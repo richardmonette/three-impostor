@@ -1,7 +1,7 @@
 {
   "name": "three-impostor",
-  "version": "0.1.0",
-  "description": "Ray-marched impostors for three.js WebGPU",
+  "version": "0.2.0",
+  "description": "Box and octahedral impostors for three.js WebGPU",
   "type": "module",
   "main": "Impostor.js",
   "module": "Impostor.js",
@@ -17,6 +17,7 @@
     "webgpu",
     "tsl",
     "impostor",
+    "octahedral",
     "lod"
   ],
   "author": "Richard Monette",

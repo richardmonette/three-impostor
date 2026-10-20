@@ -72,22 +72,33 @@
 			dragon.position.set( - 2, 0, 0 );
 			scene.add( dragon );
 
-			const impostor = await new ImpostorBaker( renderer ).bake( dragon );
+			const baker = new ImpostorBaker( renderer );
+			const materials = {
+				box: new ImpostorNodeMaterial( await baker.bake( dragon ), { roughness: 0.5 } ),
+				octahedral: new ImpostorNodeMaterial( await baker.bake( dragon, { layout: 'octahedral' } ), { roughness: 0.5 } )
+			};
 
-			const mesh = new THREE.Mesh( impostor.geometry, new ImpostorNodeMaterial( impostor, { roughness: 0.5 } ) );
+			const mesh = new THREE.Mesh( materials.box.impostor.geometry, materials.box );
 			mesh.quaternion.copy( dragon.quaternion );
 			mesh.scale.copy( dragon.scale );
 			mesh.position.set( 2, 0, 0 );
 			scene.add( mesh );
 
 			// the impostor's own triangles, drawn over it
-			const wireframe = new THREE.LineSegments( new THREE.WireframeGeometry( impostor.geometry ), new THREE.LineBasicNodeMaterial() );
+			const wireframe = new THREE.LineSegments( new THREE.WireframeGeometry( mesh.geometry ), new THREE.LineBasicNodeMaterial() );
 			wireframe.visible = false;
 			mesh.add( wireframe );
 
-			const params = { wireframe: false };
+			const params = { layout: 'box', wireframe: false };
+			const gui = new GUI();
 
-			new GUI().add( params, 'wireframe' ).onChange( ( value ) => {
+			gui.add( params, 'layout', [ 'box', 'octahedral' ] ).onChange( ( value ) => {
+
+				mesh.material = materials[ value ];
+
+			} );
+
+			gui.add( params, 'wireframe' ).onChange( ( value ) => {
 
 				dragon.material.wireframe = value;
 				dragon.material.needsUpdate = true;
