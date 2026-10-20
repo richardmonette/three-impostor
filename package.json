@@ -1,0 +1,38 @@
+{
+  "name": "three-impostor",
+  "version": "0.1.0",
+  "description": "Ray-marched impostors for three.js WebGPU",
+  "type": "module",
+  "main": "Impostor.js",
+  "module": "Impostor.js",
+  "exports": {
+    ".": "./Impostor.js"
+  },
+  "files": [
+    "Impostor.js"
+  ],
+  "keywords": [
+    "three",
+    "three.js",
+    "webgpu",
+    "tsl",
+    "impostor",
+    "lod"
+  ],
+  "author": "Richard Monette",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/richardmonette/three-impostor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/richardmonette/three-impostor/issues"
+  },
+  "homepage": "https://github.com/richardmonette/three-impostor#readme",
+  "peerDependencies": {
+    "three": ">=0.186.0"
+  },
+  "devDependencies": {
+    "three": "^0.186.1"
+  }
+}
