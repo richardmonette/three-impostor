@@ -4,6 +4,8 @@ Ray-marched impostors for three.js `WebGPURenderer`.
 
 [Demo](https://richardmonette.github.io/three-impostor/)
 
+<img src="https://raw.githubusercontent.com/richardmonette/three-impostor/main/examples/screenshots/dragon.jpg" width="49%"> <img src="https://raw.githubusercontent.com/richardmonette/three-impostor/main/examples/screenshots/dragon_wireframe.jpg" width="49%">
+
 An object is captured once from six sides. It can then be drawn as a box of 12 triangles whose shader
 marches each pixel's ray through the captured data, finds the surface, and shades it with the captured
 colour and normal through the usual three.js lighting. The hit writes its real depth, so impostors
