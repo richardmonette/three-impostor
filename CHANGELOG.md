@@ -6,6 +6,8 @@
   merge into one solid
 - Box: shade each point from the views that face it, which removes streaks where a view saw the
   surface edge on
+- Box: surfaces that no view saw, like the far side of a gap, take their normal from the shape of the
+  intervals, so they are lit like the rest of the object
 
 ## 0.2.0
 

@@ -54,6 +54,7 @@ import {
 	materialColor,
 	max,
 	min,
+	mix,
 	modelWorldMatrix,
 	mrt,
 	normalView,
@@ -63,6 +64,7 @@ import {
 	property,
 	screenUV,
 	select,
+	smoothstep,
 	storage,
 	texture,
 	transpose,
@@ -500,17 +502,35 @@ class ImpostorBaker {
 			const high = capture( positive.textures[ 2 ], positiveUV[ axis ] ).element( axis );
 			const low = capture( negative.textures[ 2 ], negativeUV[ axis ] ).element( axis );
 
-			// the gap is kept only if it lies inside the interval, which open or thin meshes may not give;
-			// otherwise it is stored closed at the exit, so filtering towards a neighbouring gap stays sensible
+			// the gap is kept only where it lies inside the interval, which open or thin meshes may not give,
+			// and only the part that is empty for the neighbouring texels too, so filtering never carves into a solid
 			const exit = capture( gaps[ axis ].exit.texture, positiveUV[ axis ] );
 			const next = capture( gaps[ axis ].next.texture, positiveUV[ axis ] );
-			const gapTop = exit.element( axis ), gapBottom = next.element( axis );
-			const open = positiveCovered.and( exit.a.greaterThan( 0.5 ) ).and( next.a.greaterThan( 0.5 ) ).and( gapTop.lessThanEqual( high ) ).and( gapBottom.greaterThanEqual( low ) );
-			const closed = select( exit.a.greaterThan( 0.5 ), gapTop, 0 );
+			let gapTop = exit.element( axis ), gapBottom = next.element( axis );
+
+			for ( let du = - 1; du <= 1; du ++ ) {
+
+				for ( let dv = - 1; dv <= 1; dv ++ ) {
+
+					const neighbourUV = positiveUV[ axis ].add( vec2( du, dv ).div( resolution ) );
+					const neighbourExit = capture( gaps[ axis ].exit.texture, neighbourUV );
+					const neighbourNext = capture( gaps[ axis ].next.texture, neighbourUV );
+
+					gapTop = min( gapTop, select( neighbourExit.a.greaterThan( 0.5 ), neighbourExit.element( axis ), 1 ) );
+					gapBottom = max( gapBottom, select( neighbourNext.a.greaterThan( 0.5 ), neighbourNext.element( axis ), 0 ) );
+
+				}
+
+			}
+
+			const open = positiveCovered.and( exit.a.greaterThan( 0.5 ) ).and( next.a.greaterThan( 0.5 ) ).and( gapTop.lessThanEqual( high ) ).and( gapBottom.greaterThanEqual( low ) ).and( gapTop.greaterThan( gapBottom ) );
+
+			// a closed gap is stored inside out, so filtering towards it only ever shrinks a neighbouring gap
+			const closed = vec2( 0, 1 );
 
 			return {
 				vertex: tile( axis, 0, 3, 1 ),
-				fragment: vec4( select( positiveCovered, high, 0 ), select( negativeCovered, low.oneMinus(), 0 ), select( open, gapTop, closed ), select( open, gapBottom, closed ) )
+				fragment: vec4( select( positiveCovered, high, 0 ), select( negativeCovered, low.oneMinus(), 0 ), select( open, gapTop, closed.x ), select( open, gapBottom, closed.y ) )
 			};
 
 		} ) );
@@ -884,6 +904,10 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 		const inside = ( interval, c ) => c.lessThanEqual( interval.x.add( epsilon ) ).and( c.greaterThanEqual( interval.y.oneMinus().sub( epsilon ) ) )
 			.and( c.lessThanEqual( interval.w.add( epsilon ) ).or( c.greaterThanEqual( interval.z.sub( epsilon ) ) ) );
 
+		// how far c is outside the interval, negative inside
+		const outside = ( interval, c ) => max( max( c.sub( interval.x ), interval.y.oneMinus().sub( c ) ), min( c.sub( interval.w ), interval.z.sub( c ) ) );
+		const distanceOutside = ( b ) => max( max( outside( intervalAt( b, 0 ), b.x ), outside( intervalAt( b, 1 ), b.y ) ), outside( intervalAt( b, 2 ), b.z ) );
+
 		// solid = inside the surface interval along all three axes, testing one axis at a time
 		const solidAt = ( point ) => {
 
@@ -1020,7 +1044,24 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 
 			}
 
-			space.setNormal( localNormal );
+			// no view saw p, like the far side of a gap, so take the normal from the shape of the intervals instead
+
+			const normal = normalize( localNormal ).toVar();
+
+			If( closest.greaterThan( 3 / resolution ), () => {
+
+				const h = 2 / resolution;
+				const gradient = vec3(
+					distanceOutside( p.add( vec3( h, 0, 0 ) ) ).sub( distanceOutside( p.sub( vec3( h, 0, 0 ) ) ) ),
+					distanceOutside( p.add( vec3( 0, h, 0 ) ) ).sub( distanceOutside( p.sub( vec3( 0, h, 0 ) ) ) ),
+					distanceOutside( p.add( vec3( 0, 0, h ) ) ).sub( distanceOutside( p.sub( vec3( 0, 0, h ) ) ) )
+				);
+
+				normal.assign( mix( normalize( gradient.div( boxSize ) ), normal, smoothstep( 5 / resolution, 3 / resolution, closest ) ) );
+
+			} );
+
+			space.setNormal( normal );
 			space.setDepth( boxMin.add( p.mul( boxSize ) ) );
 
 			return vec4( color.div( weight ).mul( materialColor ), 1 );
