@@ -5,6 +5,7 @@ import {
 	Color,
 	DoubleSide,
 	DynamicDrawUsage,
+	FrontSide,
 	HalfFloatType,
 	InstancedInterleavedBuffer,
 	Matrix4,
@@ -53,6 +54,7 @@ import {
 	materialColor,
 	max,
 	min,
+	mix,
 	modelWorldMatrix,
 	mrt,
 	normalView,
@@ -60,7 +62,9 @@ import {
 	positionGeometry,
 	positionWorld,
 	property,
+	screenUV,
 	select,
+	smoothstep,
 	storage,
 	texture,
 	transpose,
@@ -258,7 +262,8 @@ class ImpostorData {
 
 		/**
 		 * Box layout: for each axis, the nearest surface seen from the positive side (red) and from
-		 * the negative side (green, stored as one minus the coordinate), in a 3 x 1 grid.
+		 * the negative side (green, stored as one minus the coordinate), and the first gap inside the
+		 * object seen from the positive side (blue where it starts, alpha where it ends), in a 3 x 1 grid.
 		 *
 		 * @type {?Texture}
 		 */
@@ -393,7 +398,7 @@ class ImpostorBaker {
 		const camera = new OrthographicCamera();
 		const margin = extent * 0.1;
 
-		VIEWS.forEach( ( view, i ) => {
+		const placeCamera = ( view ) => {
 
 			const half = size.getComponent( view.axis ) / 2;
 			const width = size.getComponent( view.width ) / 2;
@@ -411,12 +416,65 @@ class ImpostorBaker {
 			camera.updateProjectionMatrix();
 			camera.updateMatrixWorld();
 
+		};
+
+		VIEWS.forEach( ( view, i ) => {
+
+			placeCamera( view );
 			renderer.setRenderTarget( views[ i ] );
 			renderer.render( scene, camera );
 
 		} );
 
 		renderer.setMRT( null );
+
+		// from the + side of each axis, find the first gap inside the object: where the first solid part
+		// ends (the nearest back face) and where the next one starts (the nearest front face behind that)
+
+		const gaps = [ 0, 1, 2 ].map( ( axis ) => {
+
+			const exit = new RenderTarget( resolution, resolution, { type: HalfFloatType } );
+			const next = new RenderTarget( resolution, resolution, { type: HalfFloatType } );
+
+			const exitMaterial = new NodeMaterial();
+			exitMaterial.side = BackSide;
+			exitMaterial.fragmentNode = vec4( boxPosition, 1 );
+
+			const nextMaterial = new NodeMaterial();
+			nextMaterial.side = FrontSide;
+			nextMaterial.fragmentNode = Fn( () => {
+
+				const end = texture( exit.texture, screenUV );
+
+				If( end.a.lessThan( 0.5 ).or( boxPosition.element( axis ).greaterThanEqual( end.element( axis ).sub( 0.5 / resolution ) ) ), () => {
+
+					Discard();
+
+				} );
+
+				return vec4( boxPosition, 1 );
+
+			} )();
+
+			placeCamera( VIEWS[ axis * 2 ] );
+
+			const renderWith = ( target, material ) => {
+
+				scene.overrideMaterial = material;
+				renderer.setRenderTarget( target );
+				renderer.render( scene, camera );
+				material.dispose();
+
+			};
+
+			renderWith( exit, exitMaterial );
+			renderWith( next, nextMaterial );
+
+			scene.overrideMaterial = null;
+
+			return { exit, next };
+
+		} );
 
 		// pack the views into the colour and normal atlases, and opposite views into the interval atlas
 
@@ -444,14 +502,46 @@ class ImpostorBaker {
 			const high = capture( positive.textures[ 2 ], positiveUV[ axis ] ).element( axis );
 			const low = capture( negative.textures[ 2 ], negativeUV[ axis ] ).element( axis );
 
+			// the gap is kept only where it lies inside the interval, which open or thin meshes may not give,
+			// and only the part that is empty for the neighbouring texels too, so filtering never carves into a solid
+			const exit = capture( gaps[ axis ].exit.texture, positiveUV[ axis ] );
+			const next = capture( gaps[ axis ].next.texture, positiveUV[ axis ] );
+			let gapTop = exit.element( axis ), gapBottom = next.element( axis );
+
+			for ( let du = - 1; du <= 1; du ++ ) {
+
+				for ( let dv = - 1; dv <= 1; dv ++ ) {
+
+					const neighbourUV = positiveUV[ axis ].add( vec2( du, dv ).div( resolution ) );
+					const neighbourExit = capture( gaps[ axis ].exit.texture, neighbourUV );
+					const neighbourNext = capture( gaps[ axis ].next.texture, neighbourUV );
+
+					gapTop = min( gapTop, select( neighbourExit.a.greaterThan( 0.5 ), neighbourExit.element( axis ), 1 ) );
+					gapBottom = max( gapBottom, select( neighbourNext.a.greaterThan( 0.5 ), neighbourNext.element( axis ), 0 ) );
+
+				}
+
+			}
+
+			const open = positiveCovered.and( exit.a.greaterThan( 0.5 ) ).and( next.a.greaterThan( 0.5 ) ).and( gapTop.lessThanEqual( high ) ).and( gapBottom.greaterThanEqual( low ) ).and( gapTop.greaterThan( gapBottom ) );
+
+			// a closed gap is stored inside out, so filtering towards it only ever shrinks a neighbouring gap
+			const closed = vec2( 0, 1 );
+
 			return {
 				vertex: tile( axis, 0, 3, 1 ),
-				fragment: vec4( select( positiveCovered, high, 0 ), select( negativeCovered, low.oneMinus(), 0 ), 0, 1 )
+				fragment: vec4( select( positiveCovered, high, 0 ), select( negativeCovered, low.oneMinus(), 0 ), select( open, gapTop, closed.x ), select( open, gapBottom, closed.y ) )
 			};
 
 		} ) );
 
 		for ( const view of views ) view.dispose();
+		for ( const { exit, next } of gaps ) {
+
+			exit.dispose();
+			next.dispose();
+
+		}
 
 		return new ImpostorData( { layout: 'box', box, resolution, colorTarget, normalTarget, intervalTarget } );
 
@@ -811,7 +901,12 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 		const intervalAt = ( b, axis ) => texture( intervalMap, intervalUV( b, axis ) ).level( 0 );
 
 		const epsilon = 1.5 / resolution;
-		const inside = ( interval, c ) => c.lessThanEqual( interval.x.add( epsilon ) ).and( c.greaterThanEqual( interval.y.oneMinus().sub( epsilon ) ) );
+		const inside = ( interval, c ) => c.lessThanEqual( interval.x.add( epsilon ) ).and( c.greaterThanEqual( interval.y.oneMinus().sub( epsilon ) ) )
+			.and( c.lessThanEqual( interval.w.add( epsilon ) ).or( c.greaterThanEqual( interval.z.sub( epsilon ) ) ) );
+
+		// how far c is outside the interval, negative inside
+		const outside = ( interval, c ) => max( max( c.sub( interval.x ), interval.y.oneMinus().sub( c ) ), min( c.sub( interval.w ), interval.z.sub( c ) ) );
+		const distanceOutside = ( b ) => max( max( outside( intervalAt( b, 0 ), b.x ), outside( intervalAt( b, 1 ), b.y ) ), outside( intervalAt( b, 2 ), b.z ) );
 
 		// solid = inside the surface interval along all three axes, testing one axis at a time
 		const solidAt = ( point ) => {
@@ -935,16 +1030,38 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 				const atlasUV = viewAtlasUV( p, i );
 				const c = texture( colorMap, atlasUV ).level( 0 );
 				const n = texture( normalMap, atlasUV ).level( 0 );
-				const w = exp( distances[ i ].sub( closest ).mul( - 0.5 * resolution ) ).mul( c.a ).toVar();
 
 				// texels at silhouette edges are blended with empty space, so undo that
+				const viewNormal = n.rgb.div( max( c.a, 1e-3 ) ).mul( 2 ).sub( 1 ).toVar();
+
+				// a view that sees the surface edge on smears it along its rays, so favour views that face it
+				const facing = max( dot( viewNormal, vec3( ...VIEWS[ i ].side ) ), 0 );
+				const w = exp( distances[ i ].sub( closest ).mul( - 0.5 * resolution ) ).mul( c.a ).mul( facing.mul( facing ).add( 1e-3 ) ).toVar();
+
 				color.addAssign( c.rgb.div( max( c.a, 1e-3 ) ).mul( w ) );
-				localNormal.addAssign( n.rgb.div( max( c.a, 1e-3 ) ).mul( 2 ).sub( 1 ).mul( w ) );
+				localNormal.addAssign( viewNormal.mul( w ) );
 				weight.addAssign( w );
 
 			}
 
-			space.setNormal( localNormal );
+			// no view saw p, like the far side of a gap, so take the normal from the shape of the intervals instead
+
+			const normal = normalize( localNormal ).toVar();
+
+			If( closest.greaterThan( 3 / resolution ), () => {
+
+				const h = 2 / resolution;
+				const gradient = vec3(
+					distanceOutside( p.add( vec3( h, 0, 0 ) ) ).sub( distanceOutside( p.sub( vec3( h, 0, 0 ) ) ) ),
+					distanceOutside( p.add( vec3( 0, h, 0 ) ) ).sub( distanceOutside( p.sub( vec3( 0, h, 0 ) ) ) ),
+					distanceOutside( p.add( vec3( 0, 0, h ) ) ).sub( distanceOutside( p.sub( vec3( 0, 0, h ) ) ) )
+				);
+
+				normal.assign( mix( normalize( gradient.div( boxSize ) ), normal, smoothstep( 5 / resolution, 3 / resolution, closest ) ) );
+
+			} );
+
+			space.setNormal( normal );
 			space.setDepth( boxMin.add( p.mul( boxSize ) ) );
 
 			return vec4( color.div( weight ).mul( materialColor ), 1 );

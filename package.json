@@ -1,6 +1,6 @@
 {
   "name": "three-impostor",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Box and octahedral impostors for three.js WebGPU",
   "type": "module",
   "main": "Impostor.js",

@@ -73,6 +73,8 @@ apply. `color` tints the captured colour.
 
 - Requires three.js r186 or later. Works with both the WebGPU and WebGL 2 backends of `WebGPURenderer`.
 - The capture records base colour and normals. Roughness and metalness come from the material.
-- Box: hollows that can't be seen from any of the six sides are filled in.
+- Box: each axis keeps the first gap inside the object, so a part in front of another, like a leg in
+  front of a body, stays separate. Deeper hollows that can't be seen from any of the six sides are filled
+  in. Gaps are found from back faces, so they work best with closed meshes.
 - Octahedral: silhouettes are slightly softer, and the default capture uses about 38 MB of GPU memory.
 - Impostors don't cast shadows yet.
