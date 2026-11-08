@@ -59,7 +59,7 @@ same transform as the object.
 - `layout`: the layout it was captured with
 - `box`: the box the object was captured in, in local space
 - `geometry`: a box geometry to draw the impostor with
-- `colorMap`, `normalMap`, `intervalMap`: the captured textures (`intervalMap` is box only)
+- `colorMap`, `normalMap`, `intervalMap`, `rangeMap`: the captured textures (`intervalMap` and `rangeMap` are box only)
 - `dispose()`
 
 ### `new ImpostorNodeMaterial( impostor, parameters )`
@@ -67,7 +67,8 @@ same transform as the object.
 A `MeshStandardNodeMaterial`, so `color`, `roughness`, `metalness` and the other standard parameters
 apply. `color` tints the captured colour.
 
-- `steps`: box only, the largest number of ray steps for a pixel (default `64`)
+- `steps`: box only, the largest number of ray steps for a pixel (default `128`). A step either crosses
+  an empty block of 8 texels or moves a texel and a half through one that may hold a surface.
 
 ## Notes
 
