@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1
+
+- Box: the ray march skips empty space using a small range texture made at bake time (`rangeMap`) and
+  steps a texel and a half at a time elsewhere, so thin parts like a bow or a string are no longer
+  stepped over and thin flat parts no longer show stripes. `steps` now defaults to `128`.
+- Box: a thin part is seen from both sides, so only views whose surface faces the ray now shade it. Its
+  normals no longer cancel out, which drew it black.
+
 ## 0.3.0
 
 - Box: keep the first gap inside the object along each axis, so parts in front of each other no longer
