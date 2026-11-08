@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+		<style> body { margin: 0; background: #2b3a4a; } </style>
+	</head>
+	<body>
+		<script type="importmap">
+			{
+				"imports": {
+					"three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.webgpu.js",
+					"three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.webgpu.js",
+					"three/tsl": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.tsl.js",
+					"three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/"
+				}
+			}
+		</script>
+		<script type="module">
+			import * as THREE from 'three/webgpu';
+			import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+			const q = new URLSearchParams( location.search );
+			globalThis.IMPOSTOR_DEBUG = q.get( 'debug' ); globalThis.IMPOSTOR_FIX = q.get( 'fix' );
+			const { ImpostorBaker, ImpostorNodeMaterial } = await import( './lib/' + ( q.get( 'lib' ) || 'v030' ) + '.js?' + Date.now() );
+
+			const renderer = new THREE.WebGPURenderer( { antialias: true, forceWebGL: q.get( 'webgl' ) === '1' } );
+			renderer.setPixelRatio( window.devicePixelRatio );
+			renderer.setSize( window.innerWidth, window.innerHeight );
+			document.body.appendChild( renderer.domElement );
+
+			const scene = new THREE.Scene();
+			scene.background = new THREE.Color( 0x2b3a4a );
+			scene.add( new THREE.HemisphereLight( 0xffffff, 0x2b3a4a, 2 ) );
+			const light = new THREE.DirectionalLight( 0xffffff, 3 );
+			light.position.set( 1, 2, 3 );
+			scene.add( light );
+
+			const az = Number( q.get( 'az' ) || 0 ) * Math.PI / 180, el = Number( q.get( 'el' ) || 2 ) * Math.PI / 180, dist = Number( q.get( 'dist' ) || 6 );
+			const camera = new THREE.PerspectiveCamera( 40, window.innerWidth / window.innerHeight, 0.1, 100 );
+			const target = new THREE.Vector3( 0, 1.2, 0 );
+			camera.position.set( Math.sin( az ) * Math.cos( el ), Math.sin( el ), Math.cos( az ) * Math.cos( el ) ).multiplyScalar( dist ).add( target );
+			camera.lookAt( target );
+
+			const gltf = await new GLTFLoader().loadAsync( 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r186/examples/models/gltf/DragonAttenuation.glb' );
+			const dragon = gltf.scene.getObjectByName( 'Dragon' );
+			dragon.material = new THREE.MeshStandardNodeMaterial( { color: 0xeba310, roughness: 0.5 } );
+
+			const data = await new ImpostorBaker( renderer ).bake( dragon, { layout: q.get( 'layout' ) || 'box', resolution: Number( q.get( 'res' ) || 256 ), frames: Number( q.get( 'frames' ) || 12 ) } );
+			if ( q.get( 'filter' ) === 'nearest' ) for ( const map of [ data.intervalMap ] ) { map.minFilter = map.magFilter = THREE.NearestFilter; }
+
+			const show = q.get( 'show' ) === 'mesh' ? dragon : new THREE.Mesh( data.geometry, new ImpostorNodeMaterial( data, { roughness: 0.5 } ) );
+			show.quaternion.copy( dragon.quaternion );
+			show.scale.copy( dragon.scale );
+			show.position.set( 0, 0, 0 );
+			scene.add( show );
+
+			await renderer.renderAsync( scene, camera );
+			await renderer.renderAsync( scene, camera );
+			document.title = 'ready';
+		</script>
+	</body>
+</html>
