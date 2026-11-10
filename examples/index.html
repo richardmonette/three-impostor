@@ -4,6 +4,7 @@
 		<title>three-impostor</title>
 		<meta charset="utf-8">
 		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<link rel="icon" href="data:,">
 		<style>
 			body {
 				margin: 0;
@@ -11,28 +12,108 @@
 				color: #fff;
 				font-family: monospace;
 				font-size: 13px;
+				overflow: hidden;
 			}
 
 			#info {
 				position: absolute;
 				top: 10px;
-				width: 100%;
+				left: 50%;
+				transform: translateX( -50% );
+				width: min( 560px, 100% - 32px );
 				text-align: center;
 				pointer-events: none;
+				z-index: 1;
+			}
+
+			#info a {
+				color: #8cf;
+				pointer-events: auto;
+			}
+
+			#stats {
+				opacity: 0.75;
+			}
+
+			#textures {
+				position: absolute;
+				top: 80px;
+				left: 0;
+				bottom: 0;
+				padding: 0 16px 16px;
+				box-sizing: border-box;
+				overflow: auto;
+				font: 11px sans-serif;
+			}
+
+			#textures h2 {
+				font: bold 12px monospace;
+				margin: 14px 0 8px;
+			}
+
+			#textures .row {
+				display: flex;
+				flex-wrap: wrap;
+				gap: 12px;
+			}
+
+			#textures figure {
+				margin: 0;
+				width: var( --tile, 200px );
+			}
+
+			#textures .image {
+				outline: 1px solid rgba( 255, 255, 255, 0.15 );
+			}
+
+			#textures figcaption {
+				margin-top: 4px;
+				line-height: 1.4;
+				opacity: 0.85;
+			}
+
+			@media ( max-width: 700px ) {
+
+				#info {
+					top: auto;
+					bottom: 10px;
+				}
+
+				#textures {
+					top: 140px;
+					bottom: 100px;
+				}
+
+			}
+
+			.label {
+				color: #fff;
+				font: 11px sans-serif;
+				padding: 2px 6px;
+				text-align: center;
+				border-radius: 4px;
+				border-bottom: 2px solid;
+				background: rgba( 0, 0, 0, 0.5 );
 			}
 		</style>
 	</head>
 
 	<body>
-		<div id="info">three-impostor<br>left: mesh (91,216 triangles), right: impostor (12 triangles)</div>
+		<div id="textures" hidden></div>
+
+		<div id="info">
+			<a href="https://github.com/richardmonette/three-impostor" target="_blank" rel="noopener">three-impostor</a><br>
+			<span id="about"></span><br>
+			<span id="stats"></span>
+		</div>
 
 		<script type="importmap">
 			{
 				"imports": {
-					"three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.webgpu.js",
-					"three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.webgpu.js",
-					"three/tsl": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.tsl.js",
-					"three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/"
+					"three": "https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.webgpu.js",
+					"three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.webgpu.js",
+					"three/tsl": "https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.tsl.js",
+					"three/addons/": "https://cdn.jsdelivr.net/npm/three@0.187.0/examples/jsm/"
 				}
 			}
 		</script>
@@ -40,87 +121,631 @@
 		<script type="module">
 
 			import * as THREE from 'three/webgpu';
+			import { color, max, mix, sRGBTransferEOTF, texture, uv, vec2, vec3 } from 'three/tsl';
+			import { Inspector } from 'three/addons/inspector/Inspector.js';
 			import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 			import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-			import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+			import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+			import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+			import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 			import { ImpostorBaker, ImpostorNodeMaterial } from '../Impostor.js';
+
+			const MODELS = 'https://raw.githubusercontent.com/mrdoob/three.js/r187/examples/models/gltf/';
+
+			// on narrow screens the settings start closed, as they would cover the scene
+			const narrow = window.innerWidth < 700;
+
+			const params = {
+				view: 'compare',
+				model: 'dragon',
+				count: 5,
+				boxResolution: 256,
+				octahedralResolution: 128,
+				frames: 12,
+				lod: true,
+				wireframe: false,
+				environment: true,
+				environmentIntensity: 0.5
+			};
 
 			const renderer = new THREE.WebGPURenderer( { antialias: true } );
 			renderer.setPixelRatio( window.devicePixelRatio );
 			renderer.setSize( window.innerWidth, window.innerHeight );
-			renderer.setAnimationLoop( animate );
+			renderer.inspector = new Inspector();
 			document.body.appendChild( renderer.domElement );
+			await renderer.init();
+
+			const labelRenderer = new CSS2DRenderer();
+			labelRenderer.setSize( window.innerWidth, window.innerHeight );
+			labelRenderer.domElement.style.position = 'absolute';
+			labelRenderer.domElement.style.top = '0px';
+			labelRenderer.domElement.style.pointerEvents = 'none';
+			document.body.appendChild( labelRenderer.domElement );
 
 			const scene = new THREE.Scene();
 			scene.background = new THREE.Color( 0x2b3a4a );
-			scene.add( new THREE.HemisphereLight( 0xffffff, 0x2b3a4a, 2 ) );
+
+			const hemisphere = new THREE.HemisphereLight( 0xffffff, 0x2b3a4a, 2 );
+			scene.add( hemisphere );
 
 			const light = new THREE.DirectionalLight( 0xffffff, 3 );
 			light.position.set( 1, 2, 3 );
 			scene.add( light );
 
-			const camera = new THREE.PerspectiveCamera( 40, window.innerWidth / window.innerHeight, 0.1, 100 );
-			camera.position.set( 0, 1.5, 9 );
+			const environment = new THREE.PMREMGenerator( renderer ).fromScene( new RoomEnvironment(), 0.04 ).texture;
 
+			const camera = new THREE.PerspectiveCamera( 40, window.innerWidth / window.innerHeight, 0.1, 1000 );
 			const controls = new OrbitControls( camera, renderer.domElement );
-			controls.target.set( 0, 1.2, 0 );
 
-			const gltf = await new GLTFLoader().loadAsync( 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r186/examples/models/gltf/DragonAttenuation.glb' );
+			// each level draws the object differently: the mesh up close, then the impostors
 
-			const dragon = gltf.scene.getObjectByName( 'Dragon' );
-			dragon.material = new THREE.MeshStandardNodeMaterial( { color: 0xeba310, roughness: 0.5 } );
-			dragon.position.set( - 2, 0, 0 );
-			scene.add( dragon );
+			const levels = [
+				{ name: 'mesh', distance: 0, color: new THREE.Color( 0x4fc3f7 ) },
+				{ name: 'box', distance: 18.5, color: new THREE.Color( 0xff5c8a ), mesh: new THREE.Mesh() },
+				{ name: 'octahedral', distance: 31, color: new THREE.Color( 0x8bdf5b ), mesh: new THREE.Mesh() }
+			];
+
+			// wireframes are coloured by level, so it's clear which one each object is drawing
+
+			const meshWireframeMaterial = new THREE.MeshBasicNodeMaterial( { color: levels[ 0 ].color, wireframe: true } );
+			for ( const level of levels ) level.lineMaterial = new THREE.LineBasicNodeMaterial( { color: level.color } );
+
+			// models, scaled to the dragon's size and stood on the ground; distances below are in those units
+
+			const loader = new GLTFLoader().setDRACOLoader( new DRACOLoader().setDecoderPath( 'https://cdn.jsdelivr.net/npm/three@0.187.0/examples/jsm/libs/draco/gltf/' ) );
+			const models = {};
+			let size = 0;
+
+			async function loadModel( name ) {
+
+				if ( models[ name ] ) return models[ name ];
+
+				const object = new THREE.Group();
+
+				if ( name === 'dragon' ) {
+
+					const gltf = await loader.loadAsync( MODELS + 'DragonAttenuation.glb' );
+					const dragon = gltf.scene.getObjectByName( 'Dragon' );
+					dragon.material = new THREE.MeshStandardNodeMaterial( { color: 0xeba310, roughness: 0.5 } );
+					dragon.position.set( 0, 0, 0 );
+					object.add( dragon );
+
+				} else {
+
+					const gltf = await loader.loadAsync( MODELS + 'venice_mask.glb' );
+					object.add( gltf.scene );
+
+				}
+
+				object.updateMatrixWorld( true );
+
+				const box = new THREE.Box3().setFromObject( object, true );
+				const extent = Math.max( ...box.getSize( new THREE.Vector3() ).toArray() );
+				if ( size === 0 ) size = extent;
+
+				const scale = size / extent;
+				const inner = object.children[ 0 ];
+				inner.position.sub( box.getCenter( new THREE.Vector3() ).setY( box.min.y ) ).multiplyScalar( scale );
+				inner.scale.multiplyScalar( scale );
+				object.updateMatrixWorld( true );
+
+				// triangles, and the memory the mesh's geometry and textures take
+
+				let triangles = 0;
+				const arrays = new Set(), maps = new Set();
+
+				object.traverse( ( child ) => {
+
+					if ( child.isMesh !== true ) return;
+
+					const { index, attributes } = child.geometry;
+					triangles += index ? index.count / 3 : attributes.position.count / 3;
+
+					if ( index ) arrays.add( index.array );
+					for ( const attribute of Object.values( attributes ) ) arrays.add( attribute.isInterleavedBufferAttribute ? attribute.data.array : attribute.array );
+
+					for ( const material of [ child.material ].flat() ) {
+
+						for ( const value of Object.values( material ) ) if ( value && value.isTexture ) maps.add( value );
+
+					}
+
+				} );
+
+				let geometryBytes = 0, textureBytes = 0;
+				for ( const array of arrays ) geometryBytes += array.byteLength;
+				for ( const map of maps ) textureBytes += map.image.width * map.image.height * 4 * 4 / 3; // 8-bit RGBA with mipmaps
+
+				const bounds = new THREE.Box3().setFromObject( object, true );
+
+				models[ name ] = { object, triangles, geometryBytes, textureBytes, height: bounds.max.y, width: bounds.max.x - bounds.min.x };
+				return models[ name ];
+
+			}
+
+			// impostors, baked once per model and shared by every copy
 
 			const baker = new ImpostorBaker( renderer );
-			const materials = {
-				box: new ImpostorNodeMaterial( await baker.bake( dragon ) ),
-				octahedral: new ImpostorNodeMaterial( await baker.bake( dragon, { layout: 'octahedral' } ) )
-			};
+			const objects = [];
+			let model = null;
 
-			const mesh = new THREE.Mesh( materials.box.impostor.geometry, materials.box );
-			mesh.quaternion.copy( dragon.quaternion );
-			mesh.scale.copy( dragon.scale );
-			mesh.position.set( 2, 0, 0 );
-			scene.add( mesh );
+			async function bake( index, options ) {
 
-			// the impostor's own triangles, drawn over it
-			const wireframe = new THREE.LineSegments( new THREE.WireframeGeometry( mesh.geometry ), new THREE.LineBasicNodeMaterial() );
-			wireframe.visible = false;
-			mesh.add( wireframe );
+				const data = await baker.bake( model.object, options );
+				const level = levels[ index ];
 
-			const params = { layout: 'box', wireframe: false };
-			const gui = new GUI();
+				if ( level.mesh.material.impostor ) {
 
-			gui.add( params, 'layout', [ 'box', 'octahedral' ] ).onChange( ( value ) => {
+					level.mesh.material.impostor.dispose();
+					level.mesh.material.dispose();
+					level.wireframe.dispose();
 
-				mesh.material = materials[ value ];
+				}
+
+				level.mesh.geometry = data.geometry;
+				level.mesh.material = new ImpostorNodeMaterial( data );
+				level.wireframe = new THREE.WireframeGeometry( data.geometry );
+				level.triangles = data.geometry.index.count / 3;
+				level.bytes = impostorBytes( data );
+
+				for ( const object of objects ) object.level = - 1; // relabel
+
+				for ( const { lod } of objects ) {
+
+					const object = lod.levels[ index ].object;
+					object.geometry = level.mesh.geometry;
+					object.material = level.mesh.material;
+					object.children[ 0 ].geometry = level.wireframe;
+
+				}
+
+				buildTextures();
+
+			}
+
+			const bakeBox = () => bake( 1, { resolution: params.boxResolution } );
+			const bakeOctahedral = () => bake( 2, { layout: 'octahedral', resolution: params.octahedralResolution, frames: params.frames } );
+
+			async function setModel() {
+
+				model = await loadModel( params.model );
+				levels[ 0 ].triangles = model.triangles;
+				levels[ 0 ].bytes = model.geometryBytes + model.textureBytes;
+
+				await bakeBox();
+				await bakeOctahedral();
+
+				placeObjects();
+
+			}
+
+			function setLOD() {
+
+				const compare = params.view === 'compare';
+
+				objects.forEach( ( { lod }, i ) => {
+
+					lod.autoUpdate = compare === false && params.lod;
+
+					if ( lod.autoUpdate === false ) lod.levels.forEach( ( level, l ) => level.object.visible = l === ( compare ? i : 0 ) );
+
+				} );
+
+			}
+
+			function setWireframe() {
+
+				for ( const { lod } of objects ) {
+
+					lod.levels[ 0 ].object.traverse( ( child ) => {
+
+						if ( child.isMesh ) child.material = params.wireframe ? meshWireframeMaterial : child.userData.material;
+
+					} );
+
+					for ( const level of lod.levels.slice( 1 ) ) level.object.children[ 0 ].visible = params.wireframe;
+
+				}
+
+			}
+
+			// compare: one of each level side by side. LOD: a row or a grid, each copy switching level with
+			// its distance to the camera
+
+			function placeObjects() {
+
+				for ( const { lod, label } of objects ) {
+
+					scene.remove( lod );
+					if ( label ) scene.remove( label );
+
+				}
+
+				objects.length = 0;
+
+				const compare = params.view === 'compare';
+				const count = compare ? 3 : params.count;
+				const row = compare || count === 5;
+				const side = Math.ceil( Math.sqrt( count ) );
+				for ( let i = 0; i < count; i ++ ) {
+
+					const lod = new THREE.LOD();
+
+					if ( compare ) {
+
+						// the mesh in the middle, the box impostor left of it and the octahedral one right
+						lod.position.set( [ 0, - 1, 1 ][ i ] * ( model.width + 1 ), 0, 0 );
+
+					} else if ( row ) {
+
+						lod.position.set( 0, 0, - i * 8 );
+
+					} else {
+
+						lod.position.set( ( i % side - ( side - 1 ) / 2 ) * 6, 0, - Math.floor( i / side ) * 6 );
+
+					}
+
+					const mesh = model.object.clone();
+					mesh.traverse( ( child ) => child.userData.material = child.material );
+					lod.addLevel( mesh, 0, 0.05 );
+
+					for ( const level of levels.slice( 1 ) ) {
+
+						const object = new THREE.Mesh( level.mesh.geometry, level.mesh.material );
+						const lines = new THREE.LineSegments( level.wireframe, level.lineMaterial );
+						object.add( lines );
+						lod.addLevel( object, level.distance, 0.05 );
+
+					}
+
+					scene.add( lod );
+
+					let label = null, element = null;
+
+					if ( row ) {
+
+						element = document.createElement( 'div' );
+						element.className = 'label';
+
+						label = new CSS2DObject( element );
+						label.center.set( 0.5, 1 );
+						label.position.copy( lod.position ).setY( model.height + 0.2 );
+						scene.add( label );
+
+					}
+
+					objects.push( { lod, label, element, level: - 1 } );
+
+				}
+
+				setLOD();
+				setWireframe();
+
+				if ( compare ) {
+
+					// orbit the mesh, and fit the three in the part of the screen the settings panel leaves free
+					const free = 1 - settingsWidth() / window.innerWidth;
+					const tan = Math.tan( THREE.MathUtils.degToRad( camera.fov / 2 ) );
+					const span = 3 * ( model.width + 1 );
+					const distance = Math.max( span * 1.05 / ( 2 * tan * camera.aspect * free ), model.height * 0.75 / tan );
+
+					controls.target.set( 0, model.height * 0.45, 0 );
+					camera.position.set( 0, model.height * 0.6, distance );
+
+				} else if ( row ) {
+
+					camera.position.set( - 11, 9, 8 );
+					controls.target.set( 1.5, 0, - 11.5 );
+
+				} else {
+
+					// low at the front corner, so the near copies are meshes and the far ones impostors
+					const half = ( side - 1 ) * 3;
+					controls.target.set( half * 0.2, 0, - half );
+					camera.position.set( - half * 0.5, 8, 12 );
+
+				}
+
+				updateViewOffset();
+				controls.update();
+				updateAbout();
+				buildTextures();
+
+			}
+
+			// in the compare view, the space the settings panel covers on the right, and a view shifted left
+			// by half of it, so the mesh the camera orbits stays in the middle of what's left
+
+			function settingsWidth() {
+
+				return params.view === 'compare' && narrow === false ? Math.min( 380, window.innerWidth * 0.35 ) : 0;
+
+			}
+
+			function updateViewOffset() {
+
+				const width = window.innerWidth, height = window.innerHeight;
+				const panel = settingsWidth();
+
+				if ( panel > 0 ) camera.setViewOffset( width, height, panel / 2, 0, width, height );
+				else camera.clearViewOffset();
+
+			}
+
+			function updateAbout() {
+
+				document.getElementById( 'about' ).textContent = {
+					compare: 'The mesh in the middle, a box impostor on the left and an octahedral impostor on the right.',
+					LOD: 'Each copy is a LOD: the mesh up close, then a box impostor, then an octahedral impostor. Try 400 or 1600 with LOD on and off.',
+					textures: 'The textures each impostor was baked into, and the GPU memory they take.'
+				}[ params.view ];
+
+			}
+
+			function setEnvironment() {
+
+				scene.environment = params.environment ? environment : null;
+				scene.environmentIntensity = params.environmentIntensity;
+				hemisphere.intensity = params.environment ? 1 : 2;
+				light.intensity = params.environment ? 2.5 : 3;
+
+			}
+
+			// textures: what each impostor was baked into, drawn where the page lays it out
+
+			const texturesElement = document.getElementById( 'textures' );
+			const board = new THREE.Scene();
+			board.background = scene.background;
+			const boardCamera = new THREE.OrthographicCamera( 0, 1, 0, - 1, - 1, 1 );
+			const tile = new THREE.PlaneGeometry();
+			const tiles = [];
+
+			const FORMATS = { [ THREE.HalfFloatType ]: [ 'half float', 8 ], [ THREE.UnsignedByteType ]: [ '8-bit', 4 ] };
+			const mapBytes = ( map ) => map.image.width * map.image.height * FORMATS[ map.type ][ 1 ];
+			const impostorBytes = ( data ) => [ data.colorMap, data.normalMap, data.materialMap, data.emissiveMap, data.intervalMap, data.rangeMap ].filter( Boolean ).reduce( ( sum, map ) => sum + mapBytes( map ), 0 );
+			const formatBytes = ( bytes ) => bytes < 1048576 ? `${ Math.ceil( bytes / 1024 ) } KB` : `${ ( bytes / 1048576 ).toFixed( 1 ) } MB`;
+
+			function bakedTextures( data ) {
+
+				const sample = ( map ) => texture( map, vec2( uv().x, uv().y.oneMinus() ) );
+				const coverage = sample( data.colorMap ).a;
+				const background = color( 0x1b2633 );
+
+				// normals and material values are data, shown as stored rather than as colours; the maps
+				// besides colour are masked by coverage, so they're divided by it to show the full value
+				const stored = ( value ) => sRGBTransferEOTF( value );
+				const unmasked = ( map ) => sample( map ).rgb.div( max( coverage, 1e-4 ) );
+
+				const list = [
+					{ name: 'colour', about: 'base colour, alpha: coverage', map: data.colorMap, node: mix( background, sample( data.colorMap ).rgb, coverage ) },
+					{ name: 'normal', about: data.layout === 'octahedral' ? 'normal, alpha: height' : 'normal', map: data.normalMap, node: mix( background, stored( unmasked( data.normalMap ) ), coverage ) }
+				];
+
+				if ( data.materialMap ) list.push( { name: 'material', about: 'red: roughness, green: metalness, blue: AO', map: data.materialMap, node: mix( background, stored( unmasked( data.materialMap ) ), coverage ) } );
+				if ( data.emissiveMap ) list.push( { name: 'emissive', about: 'emissive light', map: data.emissiveMap, node: mix( background, unmasked( data.emissiveMap ), coverage ) } );
+				if ( data.intervalMap ) list.push( { name: 'interval', about: 'nearest surfaces and first gap, per axis', map: data.intervalMap, node: stored( sample( data.intervalMap ).rgb ) } );
+				if ( data.rangeMap ) list.push( { name: 'range', about: 'where each 8 x 8 block holds a surface', map: data.rangeMap, node: stored( vec3( sample( data.rangeMap ).rg, 0 ) ) } );
+
+				return list;
+
+			}
+
+			function buildTextures() {
+
+				for ( const { mesh } of tiles ) {
+
+					board.remove( mesh );
+					mesh.material.dispose();
+
+				}
+
+				tiles.length = 0;
+				texturesElement.replaceChildren();
+				texturesElement.hidden = params.view !== 'textures';
+
+				if ( texturesElement.hidden ) return;
+
+				const heading = ( text ) => {
+
+					const element = document.createElement( 'h2' );
+					element.textContent = text;
+					texturesElement.append( element );
+
+				};
+
+				heading( `mesh: ${ model.triangles.toLocaleString( 'en-US' ) } triangles, ${ formatBytes( model.geometryBytes ) } of geometry` + ( model.textureBytes > 0 ? `, about ${ formatBytes( model.textureBytes ) } of textures` : '' ) );
+
+				const totals = [];
+
+				for ( const level of levels.slice( 1 ) ) {
+
+					const data = level.mesh.material.impostor;
+					if ( data === undefined ) continue;
+
+					const list = bakedTextures( data ).map( ( entry ) => {
+
+						const { width, height } = entry.map.image;
+						return { ...entry, width, height, format: FORMATS[ entry.map.type ][ 0 ], bytes: mapBytes( entry.map ) };
+
+					} );
+
+					const total = list.reduce( ( sum, { bytes } ) => sum + bytes, 0 );
+					const views = data.layout === 'box' ? `6 views of ${ data.resolution } px` : `${ data.frames } x ${ data.frames } views of ${ data.resolution } px`;
+
+					totals.push( `${ level.name } ${ formatBytes( total ) }` );
+					heading( `${ level.name } impostor: ${ views }, ${ formatBytes( total ) }` );
+
+					const row = document.createElement( 'div' );
+					row.className = 'row';
+					texturesElement.append( row );
+
+					for ( const { name, about, node, width, height, format, bytes } of list ) {
+
+						const image = document.createElement( 'div' );
+						image.className = 'image';
+						image.style.aspectRatio = `${ width } / ${ height }`;
+
+						const caption = document.createElement( 'figcaption' );
+						caption.innerHTML = `<b>${ name }</b>, ${ formatBytes( bytes ) }<br>${ width } x ${ height }, RGBA ${ format }<br>${ about }`;
+
+						const figure = document.createElement( 'figure' );
+						figure.append( image, caption );
+						row.append( figure );
+
+						const material = new THREE.MeshBasicNodeMaterial();
+						material.colorNode = node;
+
+						const mesh = new THREE.Mesh( tile, material );
+						board.add( mesh );
+						tiles.push( { mesh, image } );
+
+					}
+
+				}
+
+				document.getElementById( 'stats' ).textContent = `baked textures: ${ totals.join( ', ' ) }`;
+
+				fitTextures();
+
+			}
+
+			// the largest tiles that fit beside the settings panel; the area scrolls if even small ones don't
+
+			function fitTextures() {
+
+				texturesElement.style.right = `${ narrow ? 0 : Math.min( 380, window.innerWidth * 0.35 ) }px`;
+
+				for ( let width = 260; width >= 100; width -= 20 ) {
+
+					texturesElement.style.setProperty( '--tile', `${ width }px` );
+					if ( texturesElement.scrollHeight <= texturesElement.clientHeight ) break;
+
+				}
+
+			}
+
+			function renderTextures() {
+
+				boardCamera.right = window.innerWidth;
+				boardCamera.bottom = - window.innerHeight;
+				boardCamera.updateProjectionMatrix();
+
+				const area = texturesElement.getBoundingClientRect();
+
+				for ( const { mesh, image } of tiles ) {
+
+					const rect = image.getBoundingClientRect();
+
+					mesh.position.set( rect.left + rect.width / 2, - rect.top - rect.height / 2, 0 );
+					mesh.scale.set( rect.width, rect.height, 1 );
+					mesh.visible = rect.top >= area.top && rect.bottom <= area.bottom;
+
+				}
+
+				renderer.render( board, boardCamera );
+
+			}
+
+			// one change at a time, as each one may wait for a bake
+
+			let queue = Promise.resolve();
+			const run = ( task ) => () => queue = queue.then( task );
+
+			setEnvironment();
+			await setModel();
+
+			// gui
+
+			const gui = renderer.inspector.createParameters( 'Settings' );
+
+			const lodControls = [];
+			const display = ( control, visible ) => visible ? control.show() : control.hide();
+
+			gui.add( params, 'view', [ 'compare', 'LOD', 'textures' ] ).onChange( () => {
+
+				placeObjects();
+				for ( const control of lodControls ) display( control, params.view === 'LOD' );
+
+				labelRenderer.domElement.hidden = params.view === 'textures';
+				controls.enabled = params.view !== 'textures';
 
 			} );
 
-			gui.add( params, 'wireframe' ).onChange( ( value ) => {
+			gui.add( params, 'model', [ 'dragon', 'venice mask' ] ).onChange( run( setModel ) );
+			lodControls.push( gui.add( params, 'count', [ 5, 400, 1600 ] ).name( 'copies' ).onChange( placeObjects ) );
+			lodControls.push( gui.add( params, 'lod' ).name( 'LOD' ).onChange( setLOD ) );
+			gui.add( params, 'boxResolution', [ 64, 128, 256, 512 ] ).name( 'box resolution' ).onChange( run( bakeBox ) );
+			gui.add( params, 'octahedralResolution', { 64: 64, 128: 128, 256: 256, '512 (memory heavy)': 512 } ).name( 'octahedral resolution' ).onChange( run( bakeOctahedral ) );
+			gui.add( params, 'frames', [ 8, 12, 16 ] ).name( 'octahedral frames' ).onChange( run( bakeOctahedral ) );
+			gui.add( params, 'wireframe' ).onChange( setWireframe );
+			gui.add( params, 'environment' ).onChange( ( value ) => {
 
-				dragon.material.wireframe = value;
-				dragon.material.needsUpdate = true;
-				wireframe.visible = value;
+				setEnvironment();
+				display( brightness, value );
 
 			} );
+
+			const brightness = gui.add( params, 'environmentIntensity', 0, 2, 0.05 ).name( 'environment brightness' ).onChange( setEnvironment );
+
+			for ( const control of lodControls ) display( control, false );
+			if ( narrow ) gui.close();
 
 			window.addEventListener( 'resize', onWindowResize );
+			renderer.setAnimationLoop( render );
 
 			function onWindowResize() {
 
 				camera.aspect = window.innerWidth / window.innerHeight;
+				updateViewOffset();
 				camera.updateProjectionMatrix();
 
 				renderer.setSize( window.innerWidth, window.innerHeight );
+				labelRenderer.setSize( window.innerWidth, window.innerHeight );
+
+				if ( params.view === 'textures' ) fitTextures();
 
 			}
 
-			function animate() {
+			const stats = document.getElementById( 'stats' );
+			let statsTime = 0;
+
+			function render( time ) {
+
+				if ( params.view === 'textures' ) return renderTextures();
 
 				controls.update();
 				renderer.render( scene, camera );
+
+				// label each object with the level it is showing
+
+				for ( const object of objects ) {
+
+					if ( object.element === null ) continue;
+
+					const level = object.lod.levels.findIndex( ( level ) => level.object.visible );
+
+					if ( level !== object.level ) {
+
+						const { name, triangles, bytes, color } = levels[ level ];
+
+						object.level = level;
+						object.element.innerHTML = `${ name }<br>${ triangles.toLocaleString( 'en-US' ) } triangles, ${ formatBytes( bytes ) }`;
+						object.element.style.borderColor = `#${ color.getHexString() }`;
+
+					}
+
+				}
+
+				labelRenderer.render( scene, camera );
+
+				if ( time - statsTime > 250 ) {
+
+					const { triangles, drawCalls } = renderer.info.render;
+					stats.textContent = `${ triangles.toLocaleString( 'en-US' ) } triangles, ${ drawCalls.toLocaleString( 'en-US' ) } draw calls`;
+					statsTime = time;
+
+				}
 
 			}
 
