@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.0
+
+- Textured materials keep their roughness, metalness, ambient occlusion and emissive light: the bake
+  captures them into `materialMap` (roughness, metalness and ambient occlusion in one 8-bit atlas) and
+  `emissiveMap` (only when some part of the object is emissive).
+- `bake( object, { maps } )` chooses which of `'roughness'`, `'metalness'`, `'ao'` and `'emissive'` to
+  capture; all four by default. `maps: []` captures none, as before.
+- The material's `roughness` and `metalness` now scale the captured values, as they do a texture map, and
+  `metalness` defaults to `1` when metalness was captured. Objects with a single plain material look the
+  same as before without passing `roughness` or `metalness` to the impostor.
+- Box: open meshes, like a scan with no base, no longer lose the part behind the opening. A side that
+  looks into an opening now takes the object to run on to that side of the box, and the other two axes
+  carve its shape. Closed meshes are unaffected.
+
 ## 0.3.1
 
 - Box: the ray march skips empty space using a small range texture made at bake time (`rangeMap`) and
