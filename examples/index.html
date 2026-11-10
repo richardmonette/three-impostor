@@ -137,7 +137,7 @@
 
 			const params = {
 				view: 'compare',
-				model: 'dragon',
+				model: 'venice mask',
 				count: 5,
 				boxResolution: 256,
 				octahedralResolution: 128,
@@ -190,11 +190,12 @@
 			const meshWireframeMaterial = new THREE.MeshBasicNodeMaterial( { color: levels[ 0 ].color, wireframe: true } );
 			for ( const level of levels ) level.lineMaterial = new THREE.LineBasicNodeMaterial( { color: level.color } );
 
-			// models, scaled to the dragon's size and stood on the ground; distances below are in those units
+			// models, scaled to the dragon's size, 3.5 across, and stood on the ground; distances below are in
+			// those units
 
 			const loader = new GLTFLoader().setDRACOLoader( new DRACOLoader().setDecoderPath( 'https://cdn.jsdelivr.net/npm/three@0.187.0/examples/jsm/libs/draco/gltf/' ) );
 			const models = {};
-			let size = 0;
+			const SIZE = 3.5;
 
 			async function loadModel( name ) {
 
@@ -221,9 +222,8 @@
 
 				const box = new THREE.Box3().setFromObject( object, true );
 				const extent = Math.max( ...box.getSize( new THREE.Vector3() ).toArray() );
-				if ( size === 0 ) size = extent;
 
-				const scale = size / extent;
+				const scale = SIZE / extent;
 				const inner = object.children[ 0 ];
 				inner.position.sub( box.getCenter( new THREE.Vector3() ).setY( box.min.y ) ).multiplyScalar( scale );
 				inner.scale.multiplyScalar( scale );
