@@ -74,8 +74,8 @@
 
 			const baker = new ImpostorBaker( renderer );
 			const materials = {
-				box: new ImpostorNodeMaterial( await baker.bake( dragon ), { roughness: 0.5 } ),
-				octahedral: new ImpostorNodeMaterial( await baker.bake( dragon, { layout: 'octahedral' } ), { roughness: 0.5 } )
+				box: new ImpostorNodeMaterial( await baker.bake( dragon ) ),
+				octahedral: new ImpostorNodeMaterial( await baker.bake( dragon, { layout: 'octahedral' } ) )
 			};
 
 			const mesh = new THREE.Mesh( materials.box.impostor.geometry, materials.box );

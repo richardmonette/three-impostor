@@ -17,6 +17,7 @@ import {
 	PlaneGeometry,
 	RenderTarget,
 	Scene,
+	UnsignedByteType,
 	Vector3
 } from 'three/webgpu';
 import {
@@ -27,6 +28,7 @@ import {
 	Loop,
 	OnBeforeFrameUpdate,
 	abs,
+	ambientOcclusion,
 	bool,
 	buffer,
 	cameraFar,
@@ -40,6 +42,7 @@ import {
 	depth,
 	diffuseColor,
 	dot,
+	emissive,
 	exp,
 	float,
 	floor,
@@ -52,6 +55,8 @@ import {
 	mat3,
 	mat4,
 	materialColor,
+	materialMetalness,
+	materialRoughness,
 	max,
 	min,
 	mix,
@@ -122,6 +127,10 @@ const axisUV = [
 // The range texture summarises the interval texture in blocks of CELL x CELL texels.
 
 const CELL = 8;
+
+// The material properties that can be captured besides colour and normal.
+
+const MAPS = [ 'roughness', 'metalness', 'ao', 'emissive' ];
 
 // Octahedral layout: an N x N grid of views over the sphere (or the upper hemisphere), placed with
 // the octahedral mapping so neighbouring grid points are neighbouring directions. Each view looks
@@ -204,7 +213,7 @@ const _clearColor = /*@__PURE__*/ new Color();
  */
 class ImpostorData {
 
-	constructor( { layout, box, resolution, frames = 0, hemisphere = false, radius = 0, colorTarget, normalTarget, intervalTarget = null, rangeTarget = null } ) {
+	constructor( { layout, box, resolution, frames = 0, hemisphere = false, radius = 0, colorTarget, normalTarget, materialTarget = null, emissiveTarget = null, intervalTarget = null, rangeTarget = null } ) {
 
 		this.isImpostorData = true;
 
@@ -266,6 +275,29 @@ class ImpostorData {
 		this.normalMap = normalTarget.texture;
 
 		/**
+		 * The material properties captured besides colour and normal: any of `'roughness'`, `'metalness'`,
+		 * `'ao'` and `'emissive'`.
+		 *
+		 * @type {Array<string>}
+		 */
+		this.maps = [];
+
+		/**
+		 * Roughness (red), metalness (green) and ambient occlusion (blue) of the views, in the same grid,
+		 * when any of them was captured.
+		 *
+		 * @type {?Texture}
+		 */
+		this.materialMap = materialTarget ? materialTarget.texture : null;
+
+		/**
+		 * Emissive light of the views, in the same grid, when it was captured.
+		 *
+		 * @type {?Texture}
+		 */
+		this.emissiveMap = emissiveTarget ? emissiveTarget.texture : null;
+
+		/**
 		 * Box layout: for each axis, the nearest surface seen from the positive side (red) and from
 		 * the negative side (green, stored as one minus the coordinate), and the first gap inside the
 		 * object seen from the positive side (blue where it starts, alpha where it ends), in a 3 x 1 grid.
@@ -290,7 +322,7 @@ class ImpostorData {
 		 */
 		this.geometry = new BoxGeometry( ...box.getSize( _size ).toArray() ).translate( ...box.getCenter( _center ).toArray() );
 
-		this._targets = [ colorTarget, normalTarget, intervalTarget, rangeTarget ].filter( Boolean );
+		this._targets = [ colorTarget, normalTarget, materialTarget, emissiveTarget, intervalTarget, rangeTarget ].filter( Boolean );
 
 	}
 
@@ -338,9 +370,21 @@ class ImpostorBaker {
 	 * @param {number} [options.resolution] - The size in pixels of each view: 256 for box, 128 for octahedral.
 	 * @param {number} [options.frames=12] - Octahedral layout: views along each side of the grid.
 	 * @param {boolean} [options.hemisphere=false] - Octahedral layout: only capture views from above.
+	 * @param {Array<string>} [options.maps=['roughness','metalness','ao','emissive']] - The material properties to
+	 * capture besides colour and normal, so textured materials keep them: any of `'roughness'`, `'metalness'`,
+	 * `'ao'` (ambient occlusion) and `'emissive'`. The first three share one 8-bit atlas; emissive gets its own,
+	 * and only when some part of the object is emissive. Leave out the ones you don't need to save memory; the
+	 * impostor then uses its own `roughness` and `metalness` instead.
 	 * @return {Promise<ImpostorData>}
 	 */
-	async bake( object, { layout = 'box', resolution = layout === 'octahedral' ? 128 : 256, frames = 12, hemisphere = false } = {} ) {
+	async bake( object, { layout = 'box', resolution = layout === 'octahedral' ? 128 : 256, frames = 12, hemisphere = false, maps = MAPS } = {} ) {
+
+		for ( const name of maps ) {
+
+			if ( MAPS.includes( name ) === false ) throw new Error( `ImpostorBaker: unknown map '${ name }', expected one of ${ MAPS.join( ', ' ) }.` );
+
+		}
+
 
 		const renderer = this.renderer;
 		await renderer.init();
@@ -350,6 +394,16 @@ class ImpostorBaker {
 		source.quaternion.identity();
 		source.scale.set( 1, 1, 1 );
 		source.updateMatrixWorld( true );
+
+		// for material maps, each material writes its surface properties to extra outputs of the capture;
+		// the materials are copied for this so the object's own ones are left alone
+
+		const materials = maps.length > 0 ? prepareMaterials( source ) : null;
+		const captured = maps.filter( ( name ) => name !== 'emissive' || materials.emissive );
+		const extras = [];
+
+		if ( captured.some( ( name ) => name !== 'emissive' ) ) extras.push( 'surface' );
+		if ( captured.includes( 'emissive' ) ) extras.push( 'emissive' );
 
 		const scene = new Scene();
 		scene.add( source );
@@ -369,8 +423,12 @@ class ImpostorBaker {
 		renderer.setClearColor( 0x000000, 0 );
 
 		const data = layout === 'octahedral'
-			? this._bakeOctahedral( scene, box, resolution, frames, hemisphere )
-			: this._bakeBox( scene, box, resolution );
+			? this._bakeOctahedral( scene, box, resolution, frames, hemisphere, extras )
+			: this._bakeBox( scene, box, resolution, extras );
+
+		if ( materials !== null ) for ( const copy of materials.copies ) copy.dispose();
+
+		data.maps = MAPS.filter( ( name ) => captured.includes( name ) );
 
 		renderer.setRenderTarget( previousTarget );
 		renderer.setMRT( previousMRT );
@@ -381,7 +439,7 @@ class ImpostorBaker {
 
 	}
 
-	_bakeBox( scene, box, resolution ) {
+	_bakeBox( scene, box, resolution, extras ) {
 
 		const renderer = this.renderer;
 		const size = box.getSize( new Vector3() );
@@ -442,6 +500,22 @@ class ImpostorBaker {
 
 		renderer.setMRT( null );
 
+		// the material maps take a second pass, as WebGPU only guarantees 32 bytes of outputs per pixel;
+		// each material writes them through its own MRT, which is used alone when the renderer has none
+
+		const extraViews = extras.length === 0 ? [] : VIEWS.map( ( view, i ) => {
+
+			const target = new RenderTarget( resolution, resolution, { count: extras.length, type: HalfFloatType } );
+			extras.forEach( ( name, e ) => target.textures[ e ].name = name );
+
+			placeCamera( view );
+			renderer.setRenderTarget( target );
+			renderer.render( scene, camera );
+
+			return target;
+
+		} );
+
 		// from the + side of each axis, find the first gap inside the object: where the first solid part
 		// ends (the nearest back face) and where the next one starts (the nearest front face behind that)
 
@@ -449,10 +523,18 @@ class ImpostorBaker {
 
 			const exit = new RenderTarget( resolution, resolution, { type: HalfFloatType } );
 			const next = new RenderTarget( resolution, resolution, { type: HalfFloatType } );
+			const inside = new RenderTarget( resolution, resolution, { type: HalfFloatType } );
 
-			const exitMaterial = new NodeMaterial();
-			exitMaterial.side = BackSide;
-			exitMaterial.fragmentNode = vec4( boxPosition, 1 );
+			const backFaces = () => {
+
+				const material = new NodeMaterial();
+				material.side = BackSide;
+				material.fragmentNode = vec4( boxPosition, 1 );
+				return material;
+
+			};
+
+			const exitMaterial = backFaces();
 
 			const nextMaterial = new NodeMaterial();
 			nextMaterial.side = FrontSide;
@@ -484,9 +566,13 @@ class ImpostorBaker {
 			renderWith( exit, exitMaterial );
 			renderWith( next, nextMaterial );
 
+			// the nearest back face from the - side too, to tell where that side looks into an opening
+			placeCamera( VIEWS[ axis * 2 + 1 ] );
+			renderWith( inside, backFaces() );
+
 			scene.overrideMaterial = null;
 
-			return { exit, next };
+			return { exit, next, inside };
 
 		} );
 
@@ -502,6 +588,15 @@ class ImpostorBaker {
 		pack( renderer, colorTarget, views.map( ( view, i ) => ( { vertex: tile( i % 3, Math.floor( i / 3 ), 3, 2 ), fragment: capture( view.textures[ 0 ], uv() ) } ) ) );
 		pack( renderer, normalTarget, views.map( ( view, i ) => ( { vertex: tile( i % 3, Math.floor( i / 3 ), 3, 2 ), fragment: capture( view.textures[ 1 ], uv() ).mul( capture( view.textures[ 0 ], uv() ).a ) } ) ) );
 
+		// the material maps are masked by coverage too, like the normals
+		const extraTargets = extras.map( ( name, e ) => {
+
+			const target = atlasTarget( 3 * resolution, 2 * resolution, name === 'surface' ? UnsignedByteType : HalfFloatType );
+			pack( renderer, target, views.map( ( view, i ) => ( { vertex: tile( i % 3, Math.floor( i / 3 ), 3, 2 ), fragment: vec4( capture( extraViews[ i ].textures[ e ], uv() ).rgb, 1 ).mul( capture( view.textures[ 0 ], uv() ).a ) } ) ) );
+			return target;
+
+		} );
+
 		const st = uv();
 		const flipU = vec2( st.x.oneMinus(), st.y );
 		const flipV = vec2( st.x, st.y.oneMinus() );
@@ -515,6 +610,15 @@ class ImpostorBaker {
 			const negativeCovered = capture( negative.textures[ 0 ], negativeUV[ axis ] ).a.greaterThan( 0.5 );
 			const high = capture( positive.textures[ 2 ], positiveUV[ axis ] ).element( axis );
 			const low = capture( negative.textures[ 2 ], negativeUV[ axis ] ).element( axis );
+
+			// from outside a closed mesh, the nearest surface always faces the view. Where it faces away, the
+			// view looks into an opening, like the base of a hollow scan, and what it sees beyond is not the
+			// object's side; the object is then taken to run on to that side of the box, and the other two
+			// axes carve its shape.
+			const plusBack = capture( gaps[ axis ].exit.texture, positiveUV[ axis ] );
+			const minusBack = capture( gaps[ axis ].inside.texture, negativeUV[ axis ] );
+			const plusOpen = plusBack.a.greaterThan( 0.5 ).and( positiveCovered.not().or( plusBack.element( axis ).greaterThan( high.add( 1 / resolution ) ) ) );
+			const minusOpen = minusBack.a.greaterThan( 0.5 ).and( negativeCovered.not().or( minusBack.element( axis ).lessThan( low.sub( 1 / resolution ) ) ) );
 
 			// the gap is kept only where it lies inside the interval, which open or thin meshes may not give,
 			// and only the part that is empty for the neighbouring texels too, so filtering never carves into a solid
@@ -544,7 +648,7 @@ class ImpostorBaker {
 
 			return {
 				vertex: tile( axis, 0, 3, 1 ),
-				fragment: vec4( select( positiveCovered, high, 0 ), select( negativeCovered, low.oneMinus(), 0 ), select( open, gapTop, closed.x ), select( open, gapBottom, closed.y ) )
+				fragment: vec4( select( plusOpen, 1, select( positiveCovered, high, 0 ) ), select( minusOpen, 1, select( negativeCovered, low.oneMinus(), 0 ) ), select( open, gapTop, closed.x ), select( open, gapBottom, closed.y ) )
 			};
 
 		} ) );
@@ -583,19 +687,20 @@ class ImpostorBaker {
 			} )()
 		} ) ) );
 
-		for ( const view of views ) view.dispose();
-		for ( const { exit, next } of gaps ) {
+		for ( const view of [ ...views, ...extraViews ] ) view.dispose();
+		for ( const { exit, next, inside } of gaps ) {
 
 			exit.dispose();
 			next.dispose();
+			inside.dispose();
 
 		}
 
-		return new ImpostorData( { layout: 'box', box, resolution, colorTarget, normalTarget, intervalTarget, rangeTarget } );
+		return new ImpostorData( { layout: 'box', box, resolution, colorTarget, normalTarget, ...extraMaps( extras, extraTargets ), intervalTarget, rangeTarget } );
 
 	}
 
-	_bakeOctahedral( scene, box, resolution, frames, hemisphere ) {
+	_bakeOctahedral( scene, box, resolution, frames, hemisphere, extras ) {
 
 		const renderer = this.renderer;
 		const center = box.getCenter( new Vector3() );
@@ -604,11 +709,13 @@ class ImpostorBaker {
 		const size = frames * resolution;
 
 		// capture every view straight into one atlas: base colour, normal, and the surface height
-		// towards the view, measured from the plane through the centre
+		// towards the view, measured from the plane through the centre, plus any material maps
+		// (at most four outputs of 8 bytes, the 32 bytes per pixel WebGPU guarantees)
 
-		const capture = new RenderTarget( size, size, { count: 2, type: HalfFloatType } );
+		const capture = new RenderTarget( size, size, { count: 2 + extras.length, type: HalfFloatType } );
 		capture.textures[ 0 ].name = 'output';
 		capture.textures[ 1 ].name = 'normal';
+		extras.forEach( ( name, i ) => capture.textures[ 2 + i ].name = name );
 
 		const towardView = normalize( cameraWorldMatrix.element( 2 ).xyz );
 		const height = dot( positionWorld.sub( vec3( ...center.toArray() ) ), towardView ).div( radius * 2 ).add( 0.5 );
@@ -665,9 +772,17 @@ class ImpostorBaker {
 		pack( renderer, colorTarget, [ { vertex: whole, fragment: texture( capture.textures[ 0 ], uv() ) } ] );
 		pack( renderer, normalTarget, [ { vertex: whole, fragment: texture( capture.textures[ 1 ], uv() ).mul( texture( capture.textures[ 0 ], uv() ).a ) } ] );
 
+		const extraTargets = extras.map( ( name, e ) => {
+
+			const target = atlasTarget( size, size, name === 'surface' ? UnsignedByteType : HalfFloatType );
+			pack( renderer, target, [ { vertex: whole, fragment: vec4( texture( capture.textures[ 2 + e ], uv() ).rgb, 1 ).mul( texture( capture.textures[ 0 ], uv() ).a ) } ] );
+			return target;
+
+		} );
+
 		capture.dispose();
 
-		return new ImpostorData( { layout: 'octahedral', box, resolution, frames, hemisphere, radius, colorTarget, normalTarget } );
+		return new ImpostorData( { layout: 'octahedral', box, resolution, frames, hemisphere, radius, colorTarget, normalTarget, ...extraMaps( extras, extraTargets ) } );
 
 	}
 
@@ -675,7 +790,53 @@ class ImpostorBaker {
 
 const worldNormal = () => normalize( cameraWorldMatrix.mul( vec4( normalView, 0 ) ).xyz );
 
-const atlasTarget = ( width, height ) => new RenderTarget( width, height, { type: HalfFloatType, depthBuffer: false } );
+const extraMaps = ( extras, targets ) => ( { materialTarget: targets[ extras.indexOf( 'surface' ) ] ?? null, emissiveTarget: targets[ extras.indexOf( 'emissive' ) ] ?? null } );
+
+const atlasTarget = ( width, height, type = HalfFloatType ) => new RenderTarget( width, height, { type, depthBuffer: false } );
+
+// Copies the materials of the object being captured and gives each one outputs for its surface properties:
+// roughness, metalness and ambient occlusion, and emissive light. Materials without a property write the
+// value three.js would use for them.
+
+function prepareMaterials( object ) {
+
+	const copies = new Map();
+	let anyEmissive = false;
+
+	const prepare = ( original ) => {
+
+		if ( copies.has( original ) ) return copies.get( original );
+
+		const copy = original.clone();
+		const standard = copy.isMeshStandardMaterial === true || copy.isMeshStandardNodeMaterial === true;
+		const glows = ( copy.emissiveNode ?? null ) !== null || ( copy.emissive?.isColor === true && copy.emissiveIntensity > 0 && ( copy.emissiveMap || copy.emissive.getHex() !== 0 ) );
+
+		anyEmissive = anyEmissive || glows;
+
+		// the material's own roughness and metalness, before three.js widens roughness on curved surfaces,
+		// which the impostor will do again when it's drawn
+		const surfaceRoughness = standard ? ( copy.roughnessNode ? float( copy.roughnessNode ) : materialRoughness ) : float( 1 );
+		const surfaceMetalness = standard ? ( copy.metalnessNode ? float( copy.metalnessNode ) : materialMetalness ) : float( 0 );
+
+		copy.mrtNode = mrt( {
+			surface: vec4( surfaceRoughness, surfaceMetalness, ambientOcclusion, 1 ),
+			emissive: vec4( glows ? emissive : vec3( 0 ), 1 )
+		} );
+
+		copies.set( original, copy );
+		return copy;
+
+	};
+
+	object.traverse( ( child ) => {
+
+		if ( child.material ) child.material = Array.isArray( child.material ) ? child.material.map( prepare ) : prepare( child.material );
+
+	} );
+
+	return { copies: [ ...copies.values() ], emissive: anyEmissive };
+
+}
 
 // render targets are sampled top row first, so tiles are written upside down
 function tile( column, row, columns, rows ) {
@@ -807,7 +968,12 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 
 		this.side = BackSide; // back faces exist whether the camera is outside or inside the box
 		this.roughness = 1;
-		this.metalness = 0;
+		this.metalness = impostor.maps.includes( 'metalness' ) ? 1 : 0; // scales the captured metalness, if there is any
+
+		this._roughness = null;
+		this._metalness = null;
+		this._ao = null;
+		this._emissive = null;
 
 		this.setValues( parameters );
 
@@ -840,6 +1006,16 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 		const hitDepth = property( 'float', 'ImpostorDepth' );
 		const space = this._setupSpace( builder, normal, hitDepth );
 
+		// the captured roughness, metalness and ambient occlusion, and emissive light, found with the colour
+		space.surface = this.impostor.materialMap ? property( 'vec3', 'ImpostorSurface' ) : null;
+		space.emissive = this.impostor.emissiveMap ? property( 'vec3', 'ImpostorEmissive' ) : null;
+
+		const { maps } = this.impostor;
+		this._roughness = maps.includes( 'roughness' ) ? space.surface.x : null;
+		this._metalness = maps.includes( 'metalness' ) ? space.surface.y : null;
+		this._ao = maps.includes( 'ao' ) ? space.surface.z : null;
+		this._emissive = space.emissive;
+
 		this.colorNode = this.impostor.layout === 'octahedral' ? this._setupOctahedral( space ) : this._setupBox( space );
 		this.normalNode = normal;
 
@@ -852,6 +1028,49 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 	setupDepth() {
 
 		// written in setupDiffuseColor(), once the impostor has found the hit
+
+	}
+
+	// The captured material maps stand in for the material's own maps; like those, they are scaled by
+	// `roughness` and `metalness`, and are only used when no node is set for the same property.
+
+	setupAmbientOcclusion( builder ) {
+
+		this._withNode( 'aoNode', this._ao, () => super.setupAmbientOcclusion( builder ) );
+
+	}
+
+	setupVariants( builder ) {
+
+		this._withNode( 'roughnessNode', this._roughness?.mul( materialRoughness ), () => {
+
+			this._withNode( 'metalnessNode', this._metalness?.mul( materialMetalness ), () => super.setupVariants( builder ) );
+
+		} );
+
+	}
+
+	setupLighting( builder ) {
+
+		return this._withNode( 'emissiveNode', this._emissive, () => super.setupLighting( builder ) );
+
+	}
+
+	_withNode( name, node, callback ) {
+
+		if ( node === undefined || node === null || this[ name ] !== null ) return callback();
+
+		this[ name ] = node;
+
+		try {
+
+			return callback();
+
+		} finally {
+
+			this[ name ] = null;
+
+		}
 
 	}
 
@@ -929,7 +1148,7 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 
 	_setupBox( space ) {
 
-		const { box, resolution, intervalMap, rangeMap, colorMap, normalMap } = this.impostor;
+		const { box, resolution, intervalMap, rangeMap, colorMap, normalMap, materialMap, emissiveMap } = this.impostor;
 		const boxMin = vec3( ...box.min.toArray() );
 		const boxSize = vec3( ...box.getSize( _size ).toArray() );
 
@@ -1132,10 +1351,14 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 			const color = vec3( 0 ).toVar();
 			const localNormal = vec3( 0 ).toVar();
 			const weight = float( 1e-5 ).toVar();
+			const surface = vec3( 0 ).toVar();
+			const glow = vec3( 0 ).toVar();
 
 			// the same colour without the ray test, for points where every view's surface faces away
 			const anyColor = vec3( 0 ).toVar();
 			const anyWeight = float( 1e-5 ).toVar();
+			const anySurface = vec3( 0 ).toVar();
+			const anyGlow = vec3( 0 ).toVar();
 
 			for ( let i = 0; i < 6; i ++ ) {
 
@@ -1162,11 +1385,29 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 				anyColor.addAssign( viewColor.mul( anyW ) );
 				anyWeight.addAssign( anyW );
 
+				if ( materialMap ) {
+
+					const viewSurface = texture( materialMap, atlasUV ).level( 0 ).rgb.div( max( c.a, 1e-3 ) ).toVar();
+					surface.addAssign( viewSurface.mul( w ) );
+					anySurface.addAssign( viewSurface.mul( anyW ) );
+
+				}
+
+				if ( emissiveMap ) {
+
+					const viewGlow = texture( emissiveMap, atlasUV ).level( 0 ).rgb.div( max( c.a, 1e-3 ) ).toVar();
+					glow.addAssign( viewGlow.mul( w ) );
+					anyGlow.addAssign( viewGlow.mul( anyW ) );
+
+				}
+
 			}
 
 			// if every view faced away, take the colour from all of them and face the ray rather than normalize nothing
 			const seen = weight.greaterThan( 1e-3 ).toVar();
 			color.assign( select( seen, color.div( weight ), anyColor.div( anyWeight ) ) );
+			if ( space.surface ) space.surface.assign( select( seen, surface.div( weight ), anySurface.div( anyWeight ) ) );
+			if ( space.emissive ) space.emissive.assign( select( seen, glow.div( weight ), anyGlow.div( anyWeight ) ) );
 			const normal = select( seen.and( length( localNormal ).greaterThan( 1e-4 ) ), normalize( localNormal ), toRay ).toVar();
 
 			// no view saw p, like the far side of a gap, so take the normal from the shape of the intervals instead
@@ -1195,7 +1436,7 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 
 	_setupOctahedral( space ) {
 
-		const { box, resolution, frames, hemisphere, radius, colorMap, normalMap } = this.impostor;
+		const { box, resolution, frames, hemisphere, radius, colorMap, normalMap, materialMap, emissiveMap } = this.impostor;
 		const center = vec3( ...box.getCenter( _center ).toArray() );
 		const half = 0.5 / resolution;
 
@@ -1218,6 +1459,8 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 			const tHit = float( 0 ).toVar();
 			const weight = float( 1e-5 ).toVar();
 			const coverage = float( 0 ).toVar();
+			const surface = vec3( 0 ).toVar();
+			const glow = vec3( 0 ).toVar();
 
 			for ( let k = 0; k < 3; k ++ ) {
 
@@ -1232,7 +1475,7 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 					const q = point.sub( center );
 					const imageUV = clamp( vec2( dot( q, right ), dot( q, up ) ).div( radius * 2 ).add( 0.5 ), half, 1 - half );
 					const atlasUV = vec2( view.x.add( imageUV.x ), view.y.add( imageUV.y.oneMinus() ) ).div( frames );
-					return { c: texture( colorMap, atlasUV ).level( 0 ), n: texture( normalMap, atlasUV ).level( 0 ) };
+					return { atlasUV, c: texture( colorMap, atlasUV ).level( 0 ), n: texture( normalMap, atlasUV ).level( 0 ) };
 
 				};
 
@@ -1255,6 +1498,8 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 				color.addAssign( c.rgb.div( max( c.a, 1e-3 ) ).mul( w ) );
 				localNormal.addAssign( s.n.rgb.div( max( c.a, 1e-3 ) ).mul( 2 ).sub( 1 ).mul( w ) );
 				tHit.addAssign( tSurface.mul( w ) );
+				if ( materialMap ) surface.addAssign( texture( materialMap, s.atlasUV ).level( 0 ).rgb.div( max( c.a, 1e-3 ) ).mul( w ) );
+				if ( emissiveMap ) glow.addAssign( texture( emissiveMap, s.atlasUV ).level( 0 ).rgb.div( max( c.a, 1e-3 ) ).mul( w ) );
 				weight.addAssign( w );
 				coverage.addAssign( w );
 
@@ -1268,6 +1513,8 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 
 			space.setNormal( localNormal );
 			space.setDepth( origin.add( direction.mul( tHit.div( weight ) ) ) );
+			if ( space.surface ) space.surface.assign( surface.div( weight ) );
+			if ( space.emissive ) space.emissive.assign( glow.div( weight ) );
 
 			return vec4( color.div( weight ).mul( materialColor ), 1 );
 

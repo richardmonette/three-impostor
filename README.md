@@ -53,19 +53,26 @@ same transform as the object.
 - `resolution`: the size in pixels of each view (default `256` for box, `128` for octahedral)
 - `frames`: octahedral only, the number of views along each side of the grid (default `12`)
 - `hemisphere`: octahedral only, capture views from above only, for objects never seen from below (default `false`)
+- `maps`: the material properties to capture besides colour and normals, any of `'roughness'`,
+  `'metalness'`, `'ao'` and `'emissive'` (default all four). Leave out the ones you don't need to save
+  memory; `[]` captures none.
 
 ### `ImpostorData`
 
 - `layout`: the layout it was captured with
 - `box`: the box the object was captured in, in local space
 - `geometry`: a box geometry to draw the impostor with
-- `colorMap`, `normalMap`, `intervalMap`, `rangeMap`: the captured textures (`intervalMap` and `rangeMap` are box only)
+- `maps`: the material properties that were captured. `'emissive'` is left out when nothing on the object is emissive.
+- `colorMap`, `normalMap`, `materialMap`, `emissiveMap`, `intervalMap`, `rangeMap`: the captured textures.
+  `materialMap` holds roughness, metalness and ambient occlusion and `emissiveMap` emissive light, when
+  captured; `intervalMap` and `rangeMap` are box only.
 - `dispose()`
 
 ### `new ImpostorNodeMaterial( impostor, parameters )`
 
 A `MeshStandardNodeMaterial`, so `color`, `roughness`, `metalness` and the other standard parameters
-apply. `color` tints the captured colour.
+apply. `color` tints the captured colour, and `roughness` and `metalness` scale the captured values like
+they do a texture map. When a property wasn't captured, the material's own value is used.
 
 - `steps`: box only, the largest number of ray steps for a pixel (default `128`). A step either crosses
   an empty block of 8 texels or moves a texel and a half through one that may hold a surface.
@@ -73,9 +80,14 @@ apply. `color` tints the captured colour.
 ## Notes
 
 - Requires three.js r186 or later. Works with both the WebGPU and WebGL 2 backends of `WebGPURenderer`.
-- The capture records base colour and normals. Roughness and metalness come from the material.
+- The capture records base colour and normals, plus whichever of roughness, metalness, ambient occlusion
+  and emissive light `maps` asks for. Roughness, metalness and ambient occlusion share one 8-bit atlas,
+  so leaving out only some of them saves no memory; emissive light has its own.
 - Box: each axis keeps the first gap inside the object, so a part in front of another, like a leg in
   front of a body, stays separate. Deeper hollows that can't be seen from any of the six sides are filled
-  in. Gaps are found from back faces, so they work best with closed meshes.
-- Octahedral: silhouettes are slightly softer, and the default capture uses about 38 MB of GPU memory.
+  in. Gaps are found from back faces, so they work best with closed meshes. Where a mesh is open, like a
+  scan with no base, the object is taken to run on to the side of the box it opens towards.
+- GPU memory at the default sizes: box about 8 MB, plus 1.5 MB for roughness, metalness and ambient
+  occlusion and 3 MB for emissive light; octahedral about 38 MB, plus 9 MB and 19 MB.
+- Octahedral: silhouettes are slightly softer.
 - Impostors don't cast shadows yet.
