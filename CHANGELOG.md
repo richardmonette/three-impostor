@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.1
 
 - Point lights, spot lights and received shadows are now worked out at the surface the impostor finds,
   not at the face of the box that was drawn, so they light and shadow it as they do the mesh. Directional
