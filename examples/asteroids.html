@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>three-impostor: asteroids</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<link rel="icon" href="data:,">
+		<style>
+			body {
+				margin: 0;
+				background: #000;
+				color: #fff;
+				font-family: monospace;
+				font-size: 13px;
+				overflow: hidden;
+			}
+
+			#info {
+				position: absolute;
+				top: 10px;
+				left: 50%;
+				transform: translateX( -50% );
+				width: min( 560px, 100% - 32px );
+				text-align: center;
+				pointer-events: none;
+				z-index: 1;
+			}
+
+			#info a {
+				color: #8cf;
+				pointer-events: auto;
+			}
+
+			#stats {
+				opacity: 0.75;
+			}
+
+			@media ( max-width: 700px ) {
+
+				#info {
+					top: auto;
+					bottom: 10px;
+				}
+
+			}
+		</style>
+	</head>
+
+	<body>
+		<div id="info">
+			<a href="https://github.com/richardmonette/three-impostor" target="_blank" rel="noopener">three-impostor</a>: asteroids (<a href="./">main demo</a>)<br>
+			<span id="about">Making asteroids&hellip;</span><br>
+			<span id="stats"></span>
+		</div>
+
+		<script type="importmap">
+			{
+				"imports": {
+					"three": "https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.webgpu.js",
+					"three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.webgpu.js",
+					"three/tsl": "https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.tsl.js",
+					"three/addons/": "https://cdn.jsdelivr.net/npm/three@0.187.0/examples/jsm/"
+				}
+			}
+		</script>
+
+		<script type="module">
+
+			import * as THREE from 'three/webgpu';
+			import { clamp, float, positionView } from 'three/tsl';
+			import { Inspector } from 'three/addons/inspector/Inspector.js';
+			import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+			import { SimplexNoise } from 'three/addons/math/SimplexNoise.js';
+			import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
+			import { ImpostorBaker, ImpostorNodeMaterial } from '../Impostor.js';
+
+			const WIREFRAME_DISTANCE = 2; // the distance a mesh's wireframe is drawn at full strength within
+			const SHAPES = 4; // different asteroids, each baked into its own impostor
+			const MAX = 10000; // the most copies
+			const BELT = 70; // the belt's radius
+
+			// on narrow screens the settings start closed, as they would cover the scene
+			const narrow = window.innerWidth < 700;
+
+			const params = {
+				count: 3000,
+				level: 'auto',
+				distance: 8,
+				resolution: 256,
+				spin: true,
+				levels: false
+			};
+
+			const renderer = new THREE.WebGPURenderer( { antialias: true } );
+			renderer.setPixelRatio( window.devicePixelRatio );
+			renderer.setSize( window.innerWidth, window.innerHeight );
+			renderer.toneMapping = THREE.ACESFilmicToneMapping;
+			renderer.inspector = new Inspector();
+			document.body.appendChild( renderer.domElement );
+			await renderer.init();
+
+			const scene = new THREE.Scene();
+			scene.background = new THREE.Color( 0x000000 );
+
+			scene.add( new THREE.HemisphereLight( 0x8899bb, 0x221a14, 0.4 ) );
+
+			const sun = new THREE.DirectionalLight( 0xfff2e0, 3.5 );
+			sun.position.set( 0.6, 0.5, - 0.8 ); // from the side, so the relief shows
+			scene.add( sun );
+
+			// the camera orbits a large asteroid inside a space the others are kept out of, so it never
+			// goes into one
+
+			const HERO = new THREE.Vector3( BELT, 0, 0 ), HERO_SIZE = 1, CLEAR = 10;
+
+			const camera = new THREE.PerspectiveCamera( 50, window.innerWidth / window.innerHeight, 0.1, 2000 );
+			camera.position.set( BELT + 4, 1.5, 5 );
+
+			const controls = new OrbitControls( camera, renderer.domElement );
+			controls.target.copy( HERO );
+			controls.minDistance = HERO_SIZE * 1.5;
+			controls.maxDistance = CLEAR - 1;
+			controls.enablePan = false;
+			controls.enableDamping = true;
+
+			// a seeded random, so the asteroids and the belt are the same every time
+
+			function random( seed ) {
+
+				return () => {
+
+					seed = seed + 0x6d2b79f5 | 0;
+					let t = Math.imul( seed ^ seed >>> 15, 1 | seed );
+					t = t + Math.imul( t ^ t >>> 7, 61 | t ) ^ t;
+					return ( ( t ^ t >>> 14 ) >>> 0 ) / 4294967296;
+
+				};
+
+			}
+
+			function randomDirection( rand ) {
+
+				const z = rand() * 2 - 1, phi = rand() * Math.PI * 2, r = Math.sqrt( 1 - z * z );
+				return new THREE.Vector3( r * Math.cos( phi ), r * Math.sin( phi ), z );
+
+			}
+
+			// asteroids: a finely divided sphere, lumpy from layers of noise, pitted with craters and
+			// stretched; about 82,000 triangles each
+
+			function createAsteroid( seed ) {
+
+				const rand = random( seed );
+				const noise = new SimplexNoise( { random: rand } );
+
+				let geometry = new THREE.IcosahedronGeometry( 1, 63 );
+				geometry.deleteAttribute( 'normal' );
+				geometry.deleteAttribute( 'uv' );
+				geometry = mergeVertices( geometry );
+
+				const craters = Array.from( { length: 40 }, () => {
+
+					const radius = 0.04 + rand() ** 3 * 0.5;
+					return { center: randomDirection( rand ), radius, depth: radius * 0.5 };
+
+				} );
+
+				const stretch = new THREE.Vector3( 1, 0.55 + rand() * 0.3, 0.7 + rand() * 0.25 );
+				const tint = 0.9 + rand() * 0.2;
+
+				const position = geometry.attributes.position;
+				const colors = new Float32Array( position.count * 3 );
+				const v = new THREE.Vector3();
+
+				for ( let i = 0; i < position.count; i ++ ) {
+
+					v.fromBufferAttribute( position, i ).normalize();
+
+					// large lumps, then finer and finer detail
+					let height = 0, amplitude = 0.6, frequency = 0.8;
+
+					for ( let octave = 0; octave < 7; octave ++ ) {
+
+						height += amplitude * noise.noise3d( v.x * frequency, v.y * frequency, v.z * frequency );
+						amplitude *= 0.45;
+						frequency *= 2.2;
+
+					}
+
+					let radius = 1 + height * 0.3, floor = 0;
+
+					for ( const crater of craters ) {
+
+						const d = v.distanceTo( crater.center ) / crater.radius;
+						if ( d < 1 ) floor = Math.max( floor, 1 - d * d );
+						radius += crater.depth * ( d < 1 ? d * d - 1 : 0 ) + crater.depth * 0.3 * Math.exp( - ( ( ( d - 1 ) / 0.25 ) ** 2 ) ); // the bowl and its rim
+
+					}
+
+					// a little light and dark, in patches, and darker crater floors
+					const shade = tint * ( 0.8 + 0.2 * noise.noise3d( v.x * 2.5 + 7, v.y * 2.5, v.z * 2.5 ) ) * ( 1 - 0.25 * floor );
+					colors.set( [ 0.36 * shade, 0.33 * shade, 0.3 * shade ], i * 3 );
+
+					v.multiplyScalar( radius ).multiply( stretch );
+					position.setXYZ( i, v.x, v.y, v.z );
+
+				}
+
+				geometry.setAttribute( 'color', new THREE.BufferAttribute( colors, 3 ) );
+				geometry.computeVertexNormals();
+
+				// a radius of 1, so a copy's scale is its size
+				geometry.computeBoundingSphere();
+				geometry.scale( 1 / geometry.boundingSphere.radius, 1 / geometry.boundingSphere.radius, 1 / geometry.boundingSphere.radius );
+				geometry.computeBoundingSphere();
+
+				return geometry;
+
+			}
+
+			const rockMaterial = new THREE.MeshStandardNodeMaterial( { vertexColors: true, roughness: 0.95 } );
+			// a mesh's triangles drawn as lines over it, fainter with distance: twice as far, the same lines
+			// cover a quarter of the pixels, so each is drawn a quarter as strong to keep the same shade.
+			// Up close the lines are clear; further away they blend into a blue tint.
+			const meshWireframeMaterial = new THREE.MeshBasicNodeMaterial( { color: 0x4fc3f7, wireframe: true, transparent: true, depthWrite: false } );
+			meshWireframeMaterial.opacityNode = clamp( float( WIREFRAME_DISTANCE ).div( positionView.length() ).pow( 2 ), 0.04, 1 );
+			const impostorWireframeMaterial = new THREE.MeshBasicNodeMaterial( { color: 0xff5c8a, wireframe: true } );
+
+			// each shape draws as two instanced meshes, the mesh for near copies and the impostor for the
+			// rest, plus the wireframes that show which is which
+
+			const shapes = [];
+
+			for ( let i = 0; i < SHAPES; i ++ ) {
+
+				const geometry = createAsteroid( 7 + i * 101 );
+
+				const mesh = new THREE.InstancedMesh( geometry, rockMaterial, MAX );
+				const impostor = new THREE.InstancedMesh( undefined, undefined, MAX );
+				const wireframe = new THREE.InstancedMesh( undefined, impostorWireframeMaterial, MAX );
+				const meshWireframe = new THREE.InstancedMesh( geometry, meshWireframeMaterial, MAX );
+
+				for ( const object of [ mesh, impostor, wireframe, meshWireframe ] ) {
+
+					object.instanceMatrix.setUsage( THREE.DynamicDrawUsage );
+					object.frustumCulled = false; // copies outside the view are skipped below
+					object.count = 0;
+					scene.add( object );
+
+				}
+
+				wireframe.instanceMatrix = impostor.instanceMatrix;
+				meshWireframe.instanceMatrix = mesh.instanceMatrix;
+
+				shapes.push( { geometry, mesh, impostor, wireframe, meshWireframe, triangles: geometry.index.count / 3 } );
+
+			}
+
+			// impostors, baked from the mesh of each shape
+
+			const baker = new ImpostorBaker( renderer );
+			let impostorBytes = 0;
+
+			async function bake() {
+
+				impostorBytes = 0;
+
+				for ( const shape of shapes ) {
+
+					const data = await baker.bake( new THREE.Mesh( shape.geometry, rockMaterial ), { resolution: params.resolution, maps: [] } );
+
+					if ( shape.impostor.material.impostor ) {
+
+						shape.impostor.material.impostor.dispose();
+						shape.impostor.material.dispose();
+
+					}
+
+					shape.impostor.geometry = data.geometry;
+					shape.impostor.material = new ImpostorNodeMaterial( data, { roughness: 0.95 } );
+					shape.wireframe.geometry = data.geometry;
+
+					for ( const map of [ data.colorMap, data.normalMap, data.intervalMap, data.rangeMap ] ) impostorBytes += map.image.width * map.image.height * 8;
+
+				}
+
+				updateAbout();
+
+			}
+
+			// the belt: copies spread around a ring, each tumbling about its own axis
+
+			const rocks = [];
+
+			{
+
+				const rand = random( 1234 );
+				const gaussian = () => Math.sqrt( - 2 * Math.log( 1 - rand() ) ) * Math.cos( Math.PI * 2 * rand() );
+
+				const rock = ( position, size ) => ( {
+					shape: rocks.length % SHAPES,
+					position,
+					size,
+					quaternion: new THREE.Quaternion().setFromAxisAngle( randomDirection( rand ), rand() * Math.PI * 2 ),
+					axis: randomDirection( rand ),
+					speed: ( 0.1 + rand() * 0.5 ) * ( rand() < 0.5 ? 1 : - 1 ) / Math.sqrt( size )
+				} );
+
+				// copies never touch: each one's bounding sphere, which holds it however it turns, is kept
+				// clear of the others, and a grid finds the neighbours to check. They are all about the same
+				// size, so how big one looks says how far away it is.
+
+				const sizes = Array.from( { length: MAX - 1 }, () => 0.85 + rand() * 0.3 );
+				const largest = Math.max( ...sizes ), GAP = 1.1, CELL = 4;
+				const grid = new Map();
+				const cell = ( x, y, z ) => ( x + 512 ) * 1048576 + ( y + 512 ) * 1024 + ( z + 512 );
+
+				function fits( position, size ) {
+
+					if ( position.distanceTo( HERO ) < CLEAR + size ) return false;
+
+					const reach = Math.ceil( ( size + largest ) * GAP / CELL );
+					const x = Math.floor( position.x / CELL ), y = Math.floor( position.y / CELL ), z = Math.floor( position.z / CELL );
+
+					for ( let i = x - reach; i <= x + reach; i ++ ) for ( let j = y - reach; j <= y + reach; j ++ ) for ( let k = z - reach; k <= z + reach; k ++ ) {
+
+						for ( const other of grid.get( cell( i, j, k ) ) ?? [] ) {
+
+							if ( other.position.distanceTo( position ) < ( other.size + size ) * GAP ) return false;
+
+						}
+
+					}
+
+					return true;
+
+				}
+
+				for ( const size of sizes ) {
+
+					let position;
+
+					do {
+
+						const angle = rand() * Math.PI * 2;
+						const radius = BELT + gaussian() * 10;
+						position = new THREE.Vector3( Math.cos( angle ) * radius, gaussian() * 4, Math.sin( angle ) * radius );
+
+					} while ( fits( position, size ) === false );
+
+					const copy = rock( position, size );
+					const key = cell( Math.floor( position.x / CELL ), Math.floor( position.y / CELL ), Math.floor( position.z / CELL ) );
+					if ( grid.has( key ) === false ) grid.set( key, [] );
+					grid.get( key ).push( copy );
+					rocks.push( copy );
+
+				}
+
+				// shuffled, as the later ones are pushed out of the crowded middle; fewer copies are then a
+				// sample of the whole belt
+
+				for ( let i = rocks.length - 1; i > 0; i -- ) {
+
+					const j = Math.floor( rand() * ( i + 1 ) );
+					[ rocks[ i ], rocks[ j ] ] = [ rocks[ j ], rocks[ i ] ];
+
+				}
+
+				// and one in the middle of the clear space, which the camera orbits
+				rocks.unshift( Object.assign( rock( HERO.clone(), HERO_SIZE ), { speed: 0.1 } ) );
+
+			}
+
+			function updateAbout() {
+
+				const { triangles } = shapes[ 0 ];
+				document.getElementById( 'about' ).textContent = `${ params.count.toLocaleString( 'en-US' ) } tumbling asteroids, about ${ triangles.toLocaleString( 'en-US' ) } triangles each as a mesh and 12 as a box impostor. ${ SHAPES } impostors, ${ ( impostorBytes / 1048576 ).toFixed( 1 ) } MB.`;
+
+			}
+
+			// each mesh's triangles in blue, and the box each impostor draws in pink
+
+			function setLevels() {
+
+				for ( const shape of shapes ) {
+
+					shape.meshWireframe.visible = params.levels;
+					shape.wireframe.visible = params.levels;
+
+				}
+
+			}
+
+			// one change at a time, as each one may wait for a bake
+
+			let queue = Promise.resolve();
+			const run = ( task ) => () => queue = queue.then( task );
+
+			await bake();
+			setLevels();
+
+			// gui
+
+			const gui = renderer.inspector.createParameters( 'Settings' );
+
+			gui.add( params, 'count', { '1,000': 1000, '3,000': 3000, '10,000': 10000 } ).name( 'asteroids' ).onChange( updateAbout );
+			gui.add( params, 'level', { 'auto': 'auto', 'all meshes (slow)': 'mesh', 'all impostors': 'impostor' } );
+			gui.add( params, 'distance', 0, 40, 1 ).name( 'mesh within (sizes)' );
+			gui.add( params, 'resolution', [ 128, 256, 512 ] ).name( 'impostor resolution' ).onChange( run( bake ) );
+			gui.add( params, 'spin' );
+			gui.add( params, 'levels' ).name( 'show levels' ).onChange( setLevels );
+
+			if ( narrow ) gui.close();
+
+			window.addEventListener( 'resize', onWindowResize );
+			renderer.setAnimationLoop( render );
+
+			function onWindowResize() {
+
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+
+				renderer.setSize( window.innerWidth, window.innerHeight );
+
+			}
+
+			// each frame, every copy turns, and goes to its shape's mesh or impostor by its distance to the
+			// camera, measured in its own size; copies outside the view are left out
+
+			const timer = new THREE.Timer();
+			const frustum = new THREE.Frustum();
+			const projection = new THREE.Matrix4();
+			const sphere = new THREE.Sphere();
+			const matrix = new THREE.Matrix4();
+			const turn = new THREE.Quaternion();
+			const scale = new THREE.Vector3();
+
+			const stats = document.getElementById( 'stats' );
+			let statsTime = 0;
+
+			function render( time ) {
+
+				timer.update( time );
+				const delta = Math.min( timer.getDelta(), 0.1 );
+
+				controls.update();
+				camera.updateMatrixWorld();
+				frustum.setFromProjectionMatrix( projection.multiplyMatrices( camera.projectionMatrix, camera.matrixWorldInverse ) );
+
+				for ( const shape of shapes ) shape.mesh.count = shape.impostor.count = 0;
+
+				let meshes = 0;
+
+				for ( let i = 0; i < params.count; i ++ ) {
+
+					const rock = rocks[ i ];
+
+					if ( params.spin ) rock.quaternion.premultiply( turn.setFromAxisAngle( rock.axis, rock.speed * delta ) );
+
+					if ( frustum.intersectsSphere( sphere.set( rock.position, rock.size ) ) === false ) continue;
+
+					const near = params.level === 'mesh' || ( params.level === 'auto' && camera.position.distanceTo( rock.position ) < params.distance * rock.size );
+					const shape = shapes[ rock.shape ];
+					const target = near ? shape.mesh : shape.impostor;
+
+					target.setMatrixAt( target.count ++, matrix.compose( rock.position, rock.quaternion, scale.setScalar( rock.size ) ) );
+					if ( near ) meshes ++;
+
+				}
+
+				let impostors = 0;
+
+				for ( const shape of shapes ) {
+
+					shape.mesh.instanceMatrix.needsUpdate = true;
+					shape.impostor.instanceMatrix.needsUpdate = true;
+					shape.wireframe.count = shape.impostor.count;
+					shape.meshWireframe.count = shape.mesh.count;
+					impostors += shape.impostor.count;
+
+				}
+
+				renderer.render( scene, camera );
+
+				if ( time - statsTime > 250 ) {
+
+					const { triangles, drawCalls } = renderer.info.render;
+					stats.textContent = `${ meshes.toLocaleString( 'en-US' ) } meshes, ${ impostors.toLocaleString( 'en-US' ) } impostors in view: ${ triangles.toLocaleString( 'en-US' ) } triangles, ${ drawCalls } draw calls`;
+					statsTime = time;
+
+				}
+
+			}
+
+		</script>
+	</body>
+</html>
