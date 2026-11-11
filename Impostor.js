@@ -38,6 +38,7 @@ import {
 	cameraViewMatrix,
 	cameraWorldMatrix,
 	clamp,
+	context,
 	cross,
 	depth,
 	diffuseColor,
@@ -127,6 +128,10 @@ const axisUV = [
 // The range texture summarises the interval texture in blocks of CELL x CELL texels.
 
 const CELL = 8;
+
+// The ray march widens every surface by this many texels on both sides, so no step can pass through one.
+
+const EPSILON = 1.5;
 
 // The material properties that can be captured besides colour and normal.
 
@@ -598,27 +603,72 @@ class ImpostorBaker {
 		} );
 
 		const st = uv();
-		const flipU = vec2( st.x.oneMinus(), st.y );
-		const flipV = vec2( st.x, st.y.oneMinus() );
-		const positiveUV = [ flipU, flipV, st ];
-		const negativeUV = [ st, st, flipU ];
+		const flipU = ( s ) => vec2( s.x.oneMinus(), s.y );
+		const flipV = ( s ) => vec2( s.x, s.y.oneMinus() );
+		const same = ( s ) => s;
+		const positiveAt = [ flipU, flipV, same ];
+		const negativeAt = [ same, same, flipU ];
+		const positiveUV = positiveAt.map( ( at ) => at( st ) );
+		const negativeUV = negativeAt.map( ( at ) => at( st ) );
 
 		pack( renderer, intervalTarget, [ 0, 1, 2 ].map( ( axis ) => {
 
 			const positive = views[ axis * 2 ], negative = views[ axis * 2 + 1 ];
-			const positiveCovered = capture( positive.textures[ 0 ], positiveUV[ axis ] ).a.greaterThan( 0.5 );
-			const negativeCovered = capture( negative.textures[ 0 ], negativeUV[ axis ] ).a.greaterThan( 0.5 );
-			const high = capture( positive.textures[ 2 ], positiveUV[ axis ] ).element( axis );
-			const low = capture( negative.textures[ 2 ], negativeUV[ axis ] ).element( axis );
 
-			// from outside a closed mesh, the nearest surface always faces the view. Where it faces away, the
-			// view looks into an opening, like the base of a hollow scan, and what it sees beyond is not the
-			// object's side; the object is then taken to run on to that side of the box, and the other two
-			// axes carve its shape.
-			const plusBack = capture( gaps[ axis ].exit.texture, positiveUV[ axis ] );
-			const minusBack = capture( gaps[ axis ].inside.texture, negativeUV[ axis ] );
-			const plusOpen = plusBack.a.greaterThan( 0.5 ).and( positiveCovered.not().or( plusBack.element( axis ).greaterThan( high.add( 1 / resolution ) ) ) );
-			const minusOpen = minusBack.a.greaterThan( 0.5 ).and( negativeCovered.not().or( minusBack.element( axis ).lessThan( low.sub( 1 / resolution ) ) ) );
+			// the surface interval along the axis at texel s of the tile, as stored: ( high, 1 - low ), where
+			// ( 0, 0 ) or anything else with high < low is empty
+			const surfaceAt = ( s ) => {
+
+				const plusUV = positiveAt[ axis ]( s ), minusUV = negativeAt[ axis ]( s );
+				const positiveCovered = capture( positive.textures[ 0 ], plusUV ).a.greaterThan( 0.5 );
+				const negativeCovered = capture( negative.textures[ 0 ], minusUV ).a.greaterThan( 0.5 );
+				const high = capture( positive.textures[ 2 ], plusUV ).element( axis );
+				const low = capture( negative.textures[ 2 ], minusUV ).element( axis );
+
+				// from outside a closed mesh, the nearest surface always faces the view. Where it faces away, the
+				// view looks into an opening, like the base of a hollow scan, and what it sees beyond is not the
+				// object's side; the object is then taken to run on to that side of the box, and the other two
+				// axes carve its shape.
+				const plusBack = capture( gaps[ axis ].exit.texture, plusUV );
+				const minusBack = capture( gaps[ axis ].inside.texture, minusUV );
+				const plusOpen = plusBack.a.greaterThan( 0.5 ).and( positiveCovered.not().or( plusBack.element( axis ).greaterThan( high.add( 1 / resolution ) ) ) );
+				const minusOpen = minusBack.a.greaterThan( 0.5 ).and( negativeCovered.not().or( minusBack.element( axis ).lessThan( low.sub( 1 / resolution ) ) ) );
+
+				const stored = vec2( select( plusOpen, 1, select( positiveCovered, high, 0 ) ), select( minusOpen, 1, select( negativeCovered, low.oneMinus(), 0 ) ) );
+
+				return { positiveCovered, high, low, stored };
+
+			};
+
+			const { positiveCovered, high, low, stored } = surfaceAt( st );
+
+			// an empty texel next to a surface is stored as the interval of its neighbours turned inside out and
+			// widened by twice the ray march's epsilon. Filtering then closes the surface half a texel out, where
+			// the coverage edge is, whatever its thickness; with an empty ( 0, 0 ) instead, a part only a texel
+			// or two thick would close almost at its texel centres, and thin parts would fall between the steps.
+			let neighbourHigh = float( 0 ), neighbourLow = float( 0 ), neighbours = float( 0 );
+
+			for ( let du = - 1; du <= 1; du ++ ) {
+
+				for ( let dv = - 1; dv <= 1; dv ++ ) {
+
+					if ( du === 0 && dv === 0 ) continue;
+
+					const neighbour = surfaceAt( st.add( vec2( du, dv ).div( resolution ) ) ).stored;
+					const solid = neighbour.x.add( neighbour.y ).greaterThanEqual( 1 );
+
+					neighbourHigh = neighbourHigh.add( select( solid, neighbour.x, 0 ) );
+					neighbourLow = neighbourLow.add( select( solid, neighbour.y.oneMinus(), 0 ) );
+					neighbours = neighbours.add( select( solid, 1, 0 ) );
+
+				}
+
+			}
+
+			const widen = 2 * EPSILON / resolution;
+			const insideOut = vec2( neighbourLow.div( neighbours ).sub( widen ), neighbourHigh.div( neighbours ).add( widen ).oneMinus() );
+			const empty = stored.x.add( stored.y ).lessThan( 1 );
+			const surface = select( empty.and( neighbours.greaterThan( 0 ) ), insideOut, stored );
 
 			// the gap is kept only where it lies inside the interval, which open or thin meshes may not give,
 			// and only the part that is empty for the neighbouring texels too, so filtering never carves into a solid
@@ -648,7 +698,7 @@ class ImpostorBaker {
 
 			return {
 				vertex: tile( axis, 0, 3, 1 ),
-				fragment: vec4( select( plusOpen, 1, select( positiveCovered, high, 0 ) ), select( minusOpen, 1, select( negativeCovered, low.oneMinus(), 0 ) ), select( open, gapTop, closed.x ), select( open, gapBottom, closed.y ) )
+				fragment: vec4( surface, select( open, gapTop, closed.x ), select( open, gapBottom, closed.y ) )
 			};
 
 		} ) );
@@ -674,7 +724,8 @@ class ImpostorBaker {
 						const texel = clamp( first.add( vec2( float( i ), float( j ) ) ).add( 0.5 ).div( resolution ), 0.5 / resolution, 1 - 0.5 / resolution );
 						const interval = texture( intervalTarget.texture, vec2( texel.x.add( axis ), texel.y ).div( vec2( 3, 1 ) ) ).level( 0 );
 
-						// uncovered texels hold ( 0, 0 ), which leaves the range unchanged
+						// empty texels hold ( 0, 0 ), which leaves the range unchanged, or their neighbours' interval inside
+						// out, which stays within those neighbours' range
 						low.assign( min( low, interval.y.oneMinus() ) );
 						high.assign( max( high, interval.x ) );
 
@@ -974,6 +1025,7 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 		this._metalness = null;
 		this._ao = null;
 		this._emissive = null;
+		this._hitView = null;
 
 		this.setValues( parameters );
 
@@ -1004,7 +1056,9 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 		// normal is needed; it also produces the normal and the depth of the hit
 		const normal = property( 'vec3', 'ImpostorNormal' );
 		const hitDepth = property( 'float', 'ImpostorDepth' );
-		const space = this._setupSpace( builder, normal, hitDepth );
+		const hitView = property( 'vec3', 'ImpostorPositionView' );
+		const space = this._setupSpace( builder, normal, hitDepth, hitView );
+		this._hitView = hitView;
 
 		// the captured roughness, metalness and ambient occlusion, and emissive light, found with the colour
 		space.surface = this.impostor.materialMap ? property( 'vec3', 'ImpostorSurface' ) : null;
@@ -1052,7 +1106,15 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 
 	setupLighting( builder ) {
 
-		return this._withNode( 'emissiveNode', this._emissive, () => super.setupLighting( builder ) );
+		return this._withNode( 'emissiveNode', this._emissive, () => {
+
+			// light the hit rather than the box face that was drawn: point and spot lights take their
+			// direction and falloff from it, and received shadows are looked up at it
+			const hitWorld = cameraWorldMatrix.mul( vec4( this._hitView, 1 ) ).xyz;
+
+			return context( super.setupLighting( builder ), { positionView: this._hitView, positionWorld: hitWorld, shadowPositionWorld: hitWorld } );
+
+		} );
 
 	}
 
@@ -1076,7 +1138,7 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 
 	// The view ray in the object's local space, and how to turn a local hit into a normal and a depth.
 
-	_setupSpace( builder, normal, hitDepth ) {
+	_setupSpace( builder, normal, hitDepth, hitView ) {
 
 		const object = builder.object;
 		const objectMatrix = object.isInstancedMesh ? modelWorldMatrix.mul( instanceMatrixNode( builder, object.instanceMatrix ) ) : modelWorldMatrix;
@@ -1128,7 +1190,8 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 			// write the real depth of the hit, so impostors intersect each other and the scene correctly
 			setDepth: ( local ) => {
 
-				const hitViewZ = viewOrigin.add( viewX.mul( local.x ) ).add( viewY.mul( local.y ) ).add( viewZ.mul( local.z ) ).z;
+				hitView.assign( viewOrigin.add( viewX.mul( local.x ) ).add( viewY.mul( local.y ) ).add( viewZ.mul( local.z ) ) );
+				const hitViewZ = hitView.z;
 
 				if ( logarithmicDepthBuffer ) {
 
@@ -1168,7 +1231,7 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 
 		const intervalAt = ( b, axis ) => texture( intervalMap, intervalUV( b, axis ) ).level( 0 );
 
-		const epsilon = 1.5 / resolution;
+		const epsilon = EPSILON / resolution;
 		const inside = ( interval, c ) => c.lessThanEqual( interval.x.add( epsilon ) ).and( c.greaterThanEqual( interval.y.oneMinus().sub( epsilon ) ) )
 			.and( c.lessThanEqual( interval.w.add( epsilon ) ).or( c.greaterThanEqual( interval.z.sub( epsilon ) ) ) );
 

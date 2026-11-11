@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Point lights, spot lights and received shadows are now worked out at the surface the impostor finds,
+  not at the face of the box that was drawn, so they light and shadow it as they do the mesh. Directional
+  and environment light were already right.
+- Box: thin parts, like rods and wires two or three texels across, no longer break up into dots. The
+  texels around a surface now close it half a texel out, where its edge is, whatever its thickness.
+
 ## 0.4.0
 
 - Textured materials keep their roughness, metalness, ambient occlusion and emissive light: the bake
