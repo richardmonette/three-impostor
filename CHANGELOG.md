@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.2
+
+- Box: about a third faster to draw. The bake makes a small grid, `distanceMap`, of how far each block of
+  8 x 8 x 8 texels is from the nearest block that may hold a surface. The ray march crosses all the empty
+  blocks within that distance in one step and reads one texel per step to check a block instead of up to
+  three. Shading no longer reads the views whose surface is far from the hit. Images are unchanged apart
+  from a few pixels on grazing edges.
+
 ## 0.4.1
 
 - Point lights, spot lights and received shadows are now worked out at the surface the impostor finds,
