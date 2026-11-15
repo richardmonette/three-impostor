@@ -501,9 +501,9 @@
 			const tile = new THREE.PlaneGeometry();
 			const tiles = [];
 
-			const FORMATS = { [ THREE.HalfFloatType ]: [ 'half float', 8 ], [ THREE.UnsignedByteType ]: [ '8-bit', 4 ] };
-			const mapBytes = ( map ) => map.image.width * map.image.height * FORMATS[ map.type ][ 1 ];
-			const impostorBytes = ( data ) => [ data.colorMap, data.normalMap, data.materialMap, data.emissiveMap, data.intervalMap, data.rangeMap ].filter( Boolean ).reduce( ( sum, map ) => sum + mapBytes( map ), 0 );
+			const FORMATS = { [ THREE.HalfFloatType ]: [ 'half float', 2 ], [ THREE.UnsignedByteType ]: [ '8-bit', 1 ] };
+			const mapBytes = ( map ) => map.image.width * map.image.height * FORMATS[ map.type ][ 1 ] * ( map.format === THREE.RedFormat ? 1 : 4 );
+			const impostorBytes = ( data ) => [ data.colorMap, data.normalMap, data.materialMap, data.emissiveMap, data.intervalMap, data.rangeMap, data.distanceMap ].filter( Boolean ).reduce( ( sum, map ) => sum + mapBytes( map ), 0 );
 			const formatBytes = ( bytes ) => bytes < 1048576 ? `${ Math.ceil( bytes / 1024 ) } KB` : `${ ( bytes / 1048576 ).toFixed( 1 ) } MB`;
 
 			function bakedTextures( data ) {
@@ -526,6 +526,7 @@
 				if ( data.emissiveMap ) list.push( { name: 'emissive', about: 'emissive light', map: data.emissiveMap, node: mix( background, unmasked( data.emissiveMap ), coverage ) } );
 				if ( data.intervalMap ) list.push( { name: 'interval', about: 'nearest surfaces and first gap, per axis', map: data.intervalMap, node: stored( sample( data.intervalMap ).rgb ) } );
 				if ( data.rangeMap ) list.push( { name: 'range', about: 'where each 8 x 8 block holds a surface', map: data.rangeMap, node: stored( vec3( sample( data.rangeMap ).rg, 0 ) ) } );
+				if ( data.distanceMap ) list.push( { name: 'distance', about: 'cells to the nearest one that may hold a surface, in slices along z', map: data.distanceMap, node: stored( vec3( sample( data.distanceMap ).r.mul( 255 / 7 ) ) ) } );
 
 				return list;
 
@@ -566,7 +567,7 @@
 					const list = bakedTextures( data ).map( ( entry ) => {
 
 						const { width, height } = entry.map.image;
-						return { ...entry, width, height, format: FORMATS[ entry.map.type ][ 0 ], bytes: mapBytes( entry.map ) };
+						return { ...entry, width, height, format: ( entry.map.format === THREE.RedFormat ? 'R ' : 'RGBA ' ) + FORMATS[ entry.map.type ][ 0 ], bytes: mapBytes( entry.map ) };
 
 					} );
 
@@ -587,7 +588,7 @@
 						image.style.aspectRatio = `${ width } / ${ height }`;
 
 						const caption = document.createElement( 'figcaption' );
-						caption.innerHTML = `<b>${ name }</b>, ${ formatBytes( bytes ) }<br>${ width } x ${ height }, RGBA ${ format }<br>${ about }`;
+						caption.innerHTML = `<b>${ name }</b>, ${ formatBytes( bytes ) }<br>${ width } x ${ height }, ${ format }<br>${ about }`;
 
 						const figure = document.createElement( 'figure' );
 						figure.append( image, caption );

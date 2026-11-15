@@ -63,9 +63,9 @@ same transform as the object.
 - `box`: the box the object was captured in, in local space
 - `geometry`: a box geometry to draw the impostor with
 - `maps`: the material properties that were captured. `'emissive'` is left out when nothing on the object is emissive.
-- `colorMap`, `normalMap`, `materialMap`, `emissiveMap`, `intervalMap`, `rangeMap`: the captured textures.
-  `materialMap` holds roughness, metalness and ambient occlusion and `emissiveMap` emissive light, when
-  captured; `intervalMap` and `rangeMap` are box only.
+- `colorMap`, `normalMap`, `materialMap`, `emissiveMap`, `intervalMap`, `rangeMap`, `distanceMap`: the captured
+  textures. `materialMap` holds roughness, metalness and ambient occlusion and `emissiveMap` emissive light,
+  when captured; `intervalMap`, `rangeMap` and `distanceMap` are box only.
 - `dispose()`
 
 ### `new ImpostorNodeMaterial( impostor, parameters )`
@@ -75,7 +75,8 @@ apply. `color` tints the captured colour, and `roughness` and `metalness` scale 
 they do a texture map. When a property wasn't captured, the material's own value is used.
 
 - `steps`: box only, the largest number of ray steps for a pixel (default `128`). A step either crosses
-  an empty block of 8 texels or moves a texel and a half through one that may hold a surface.
+  empty space, up to 13 blocks of 8 texels at once, or moves a texel and a half through a block that may
+  hold a surface.
 
 ## Notes
 

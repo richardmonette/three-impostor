@@ -15,6 +15,7 @@ import {
 	NodeMaterial,
 	OrthographicCamera,
 	PlaneGeometry,
+	RedFormat,
 	RenderTarget,
 	Scene,
 	UnsignedByteType,
@@ -133,6 +134,58 @@ const CELL = 8;
 
 const EPSILON = 1.5;
 
+// The distance texture holds, for each cell of CELL x CELL x CELL texels, how many cells away the nearest
+// one that may hold a surface is, up to this many; a step jumps across all the cells nearer than that.
+
+const REACH = 6;
+
+// Box layout: the cells are laid out as slices along z, side by side in a grid of tiles.
+
+function cellLayout( resolution ) {
+
+	const cells = Math.ceil( resolution / CELL );
+	const columns = Math.ceil( Math.sqrt( cells ) );
+	const rows = Math.ceil( cells / columns );
+
+	return { cells, columns, rows, width: columns * cells, height: rows * cells };
+
+}
+
+// The distance texture's value for a cell.
+
+function cellDistance( distanceMap, resolution, cell ) {
+
+	const { cells, columns, width, height } = cellLayout( resolution );
+	const row = floor( cell.z.add( 0.5 ).div( columns ) );
+	const tileXY = vec2( cell.z.sub( row.mul( columns ) ), row );
+
+	return floor( texture( distanceMap, tileXY.mul( cells ).add( cell.xy ).add( 0.5 ).div( vec2( width, height ) ) ).level( 0 ).x.mul( 255 ).add( 0.5 ) );
+
+}
+
+// Whether a cell of the range texture may hold a surface: along every axis, it overlaps the range where
+// that axis saw one. The margin covers the epsilon of the ray march and filtering.
+
+function cellOccupied( rangeMap, resolution, cell ) {
+
+	const { cells } = cellLayout( resolution );
+	const cellSize = CELL / resolution;
+	const margin = EPSILON / resolution + 1 / resolution;
+
+	const low = cell.mul( cellSize ).sub( margin ).toVar(), high = cell.add( 1 ).mul( cellSize ).add( margin ).toVar();
+
+	const overlaps = ( axis ) => {
+
+		const p = axisUV[ axis ]( cell.add( 0.5 ).div( cells ) );
+		const range = texture( rangeMap, vec2( p.x.add( axis ), p.y ).div( vec2( 3, 1 ) ) ).level( 0 );
+		return range.x.lessThanEqual( high.element( axis ) ).and( range.y.greaterThanEqual( low.element( axis ) ) );
+
+	};
+
+	return overlaps( 0 ).and( overlaps( 1 ) ).and( overlaps( 2 ) );
+
+}
+
 // The material properties that can be captured besides colour and normal.
 
 const MAPS = [ 'roughness', 'metalness', 'ao', 'emissive' ];
@@ -218,7 +271,7 @@ const _clearColor = /*@__PURE__*/ new Color();
  */
 class ImpostorData {
 
-	constructor( { layout, box, resolution, frames = 0, hemisphere = false, radius = 0, colorTarget, normalTarget, materialTarget = null, emissiveTarget = null, intervalTarget = null, rangeTarget = null } ) {
+	constructor( { layout, box, resolution, frames = 0, hemisphere = false, radius = 0, colorTarget, normalTarget, materialTarget = null, emissiveTarget = null, intervalTarget = null, rangeTarget = null, distanceTarget = null } ) {
 
 		this.isImpostorData = true;
 
@@ -321,13 +374,22 @@ class ImpostorData {
 		this.rangeMap = rangeTarget ? rangeTarget.texture : null;
 
 		/**
+		 * Box layout: for each cell of 8 x 8 x 8 texels of the box, how many cells away the nearest cell is
+		 * that {@link ImpostorData#rangeMap} says may hold a surface, up to 7. The cells are slices along z,
+		 * laid out side by side. The ray march uses it to jump across empty space.
+		 *
+		 * @type {?Texture}
+		 */
+		this.distanceMap = distanceTarget ? distanceTarget.texture : null;
+
+		/**
 		 * A box matching {@link ImpostorData#box}, to render the impostor with.
 		 *
 		 * @type {BoxGeometry}
 		 */
 		this.geometry = new BoxGeometry( ...box.getSize( _size ).toArray() ).translate( ...box.getCenter( _center ).toArray() );
 
-		this._targets = [ colorTarget, normalTarget, materialTarget, emissiveTarget, intervalTarget, rangeTarget ].filter( Boolean );
+		this._targets = [ colorTarget, normalTarget, materialTarget, emissiveTarget, intervalTarget, rangeTarget, distanceTarget ].filter( Boolean );
 
 	}
 
@@ -738,6 +800,63 @@ class ImpostorBaker {
 			} )()
 		} ) ) );
 
+		// for each cell, how many cells away the nearest one that may hold a surface is: 0 for those cells
+		// themselves, then one more for each ring of cells around them, up to REACH + 1
+
+		const layout = cellLayout( resolution );
+		const gridSize = vec2( layout.width, layout.height );
+		const gridTarget = () => new RenderTarget( layout.width, layout.height, { format: RedFormat, type: UnsignedByteType, depthBuffer: false, minFilter: NearestFilter, magFilter: NearestFilter, generateMipmaps: false } );
+
+		// the cell at a texel of the grid
+		const cellOf = ( texel ) => {
+
+			const tileXY = floor( texel.add( 0.5 ).div( cells ) );
+			return vec3( texel.sub( tileXY.mul( cells ) ), tileXY.y.mul( layout.columns ).add( tileXY.x ) );
+
+		};
+
+		let distance = gridTarget();
+
+		pack( renderer, distance, [ {
+			vertex: tile( 0, 0, 1, 1 ),
+			fragment: Fn( () => {
+
+				const cell = cellOf( floor( uv().mul( gridSize ) ) ).toVar();
+				const occupied = cell.z.lessThan( cells ).and( cellOccupied( rangeTarget.texture, resolution, cell ) );
+				return vec4( select( occupied, 0, REACH + 1 ).div( 255 ), 0, 0, 1 );
+
+			} )()
+		} ] );
+
+		for ( let pass = 0; pass < REACH; pass ++ ) {
+
+			const previous = distance;
+			distance = gridTarget();
+
+			pack( renderer, distance, [ {
+				vertex: tile( 0, 0, 1, 1 ),
+				fragment: Fn( () => {
+
+					const cell = cellOf( floor( uv().mul( gridSize ) ) ).toVar();
+					const nearest = cellDistance( previous.texture, resolution, cell ).toVar();
+
+					for ( let i = 0; i < 27; i ++ ) {
+
+						if ( i === 13 ) continue; // the cell itself
+						const neighbour = clamp( cell.add( vec3( i % 3 - 1, Math.floor( i / 3 ) % 3 - 1, Math.floor( i / 9 ) - 1 ) ), 0, cells - 1 );
+						nearest.assign( min( nearest, cellDistance( previous.texture, resolution, neighbour ).add( 1 ) ) );
+
+					}
+
+					return vec4( nearest.div( 255 ), 0, 0, 1 );
+
+				} )()
+			} ] );
+
+			previous.dispose();
+
+		}
+
 		for ( const view of [ ...views, ...extraViews ] ) view.dispose();
 		for ( const { exit, next, inside } of gaps ) {
 
@@ -747,7 +866,7 @@ class ImpostorBaker {
 
 		}
 
-		return new ImpostorData( { layout: 'box', box, resolution, colorTarget, normalTarget, ...extraMaps( extras, extraTargets ), intervalTarget, rangeTarget } );
+		return new ImpostorData( { layout: 'box', box, resolution, colorTarget, normalTarget, ...extraMaps( extras, extraTargets ), intervalTarget, rangeTarget, distanceTarget: distance } );
 
 	}
 
@@ -1032,8 +1151,8 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 	}
 
 	/**
-	 * Box layout: the largest number of ray steps for a pixel. A step either crosses an empty block of
-	 * 8 texels or moves a texel and a half through one that may hold a surface.
+	 * Box layout: the largest number of ray steps for a pixel. A step either crosses empty space, up to
+	 * 13 blocks of 8 texels at once, or moves a texel and a half through a block that may hold a surface.
 	 *
 	 * @type {number}
 	 * @default 128
@@ -1211,7 +1330,7 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 
 	_setupBox( space ) {
 
-		const { box, resolution, intervalMap, rangeMap, colorMap, normalMap, materialMap, emissiveMap } = this.impostor;
+		const { box, resolution, intervalMap, distanceMap, colorMap, normalMap, materialMap, emissiveMap } = this.impostor;
 		const boxMin = vec3( ...box.min.toArray() );
 		const boxSize = vec3( ...box.getSize( _size ).toArray() );
 
@@ -1268,40 +1387,8 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 
 		};
 
-		// a cell of the range texture may hold a surface when, along every axis, it overlaps the range where
-		// that axis saw one; the margin covers the epsilon of `inside` and filtering
 		const cells = Math.ceil( resolution / CELL );
 		const cellSize = CELL / resolution;
-		const margin = epsilon + 1 / resolution;
-
-		const rangeAt = ( cell, axis ) => {
-
-			const p = axisUV[ axis ]( cell.add( 0.5 ).div( cells ) );
-			return texture( rangeMap, vec2( p.x.add( axis ), p.y ).div( vec2( 3, 1 ) ) ).level( 0 );
-
-		};
-
-		const occupied = ( cell ) => {
-
-			const low = cell.mul( cellSize ).sub( margin ).toVar(), high = cell.add( 1 ).mul( cellSize ).add( margin ).toVar();
-			const overlaps = ( range, axis ) => range.x.lessThanEqual( high.element( axis ) ).and( range.y.greaterThanEqual( low.element( axis ) ) );
-
-			// one axis at a time, so most empty cells cost a single read
-			const result = bool( false ).toVar();
-
-			If( overlaps( rangeAt( cell, 0 ), 0 ), () => {
-
-				If( overlaps( rangeAt( cell, 1 ), 1 ), () => {
-
-					result.assign( overlaps( rangeAt( cell, 2 ), 2 ) );
-
-				} );
-
-			} );
-
-			return result;
-
-		};
 
 		return Fn( () => {
 
@@ -1319,7 +1406,8 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 
 			// step through cells that may hold a surface a texel and a half at a time, and jump straight across
 			// the ones that can't. `inside` widens every surface by epsilon on both sides, so nothing solid is
-			// thinner than three texels and no step lands past it; empty space costs one step per cell.
+			// thinner than three texels and no step lands past it. A cell n cells from the nearest one that may
+			// hold a surface is the middle of a block of empty cells n - 1 deep on every side, crossed in one step.
 
 			const hit = bool( false ).toVar();
 			const t = tNear.toVar();
@@ -1338,8 +1426,9 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 
 					const p = o.add( d.mul( t ) ).toVar();
 					const cell = clamp( floor( p.div( cellSize ) ), 0, cells - 1 ).toVar();
+					const empty = cellDistance( distanceMap, resolution, cell ).sub( 1 ).toVar();
 
-					If( occupied( cell ), () => {
+					If( empty.lessThan( 0 ), () => {
 
 						If( solidAt( p ), () => {
 
@@ -1353,8 +1442,8 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 
 					} ).Else( () => {
 
-						// where the ray leaves the cell, nudged past the boundary so it doesn't land back in it
-						const exits = cell.add( step( 0, d ) ).mul( cellSize ).sub( o ).mul( inverseD );
+						// where the ray leaves the block, nudged past the boundary so it doesn't land back in it
+						const exits = cell.add( step( 0, d ).mul( empty.mul( 2 ).add( 1 ) ) ).sub( empty ).mul( cellSize ).sub( o ).mul( inverseD );
 						const exit = max( min( min( exits.x, exits.y ), exits.z ), t );
 
 						previous.assign( exit );
@@ -1425,44 +1514,49 @@ class ImpostorNodeMaterial extends MeshStandardNodeMaterial {
 
 			for ( let i = 0; i < 6; i ++ ) {
 
-				const atlasUV = viewAtlasUV( p, i );
-				const c = texture( colorMap, atlasUV ).level( 0 );
-				const n = texture( normalMap, atlasUV ).level( 0 );
+				// a view whose surface is this far from p would add less than 1e-10 of its colour, so skip its reads
+				If( distances[ i ].sub( closest ).lessThan( 48 / resolution ), () => {
 
-				// texels at silhouette edges are blended with empty space, so undo that
-				const viewNormal = n.rgb.div( max( c.a, 1e-3 ) ).mul( 2 ).sub( 1 ).toVar();
+					const atlasUV = viewAtlasUV( p, i );
+					const c = texture( colorMap, atlasUV ).level( 0 );
+					const n = texture( normalMap, atlasUV ).level( 0 );
 
-				// a view that sees the surface edge on smears it along its rays, so favour views that face it
-				const facing = max( dot( viewNormal, vec3( ...VIEWS[ i ].side ) ), 0 );
+					// texels at silhouette edges are blended with empty space, so undo that
+					const viewNormal = n.rgb.div( max( c.a, 1e-3 ) ).mul( 2 ).sub( 1 ).toVar();
 
-				// on a thin part, the views on either side both see a surface near p; only the one facing the ray is the surface it hit
-				const towardRay = smoothstep( - 0.2, 0.1, dot( viewNormal, toRay ) );
-				const anyW = exp( distances[ i ].sub( closest ).mul( - 0.5 * resolution ) ).mul( c.a ).mul( facing.mul( facing ).add( 1e-3 ) ).toVar();
-				const w = anyW.mul( towardRay ).toVar();
-				const viewColor = c.rgb.div( max( c.a, 1e-3 ) ).toVar();
+					// a view that sees the surface edge on smears it along its rays, so favour views that face it
+					const facing = max( dot( viewNormal, vec3( ...VIEWS[ i ].side ) ), 0 );
 
-				color.addAssign( viewColor.mul( w ) );
-				localNormal.addAssign( viewNormal.mul( w ) );
-				weight.addAssign( w );
+					// on a thin part, the views on either side both see a surface near p; only the one facing the ray is the surface it hit
+					const towardRay = smoothstep( - 0.2, 0.1, dot( viewNormal, toRay ) );
+					const anyW = exp( distances[ i ].sub( closest ).mul( - 0.5 * resolution ) ).mul( c.a ).mul( facing.mul( facing ).add( 1e-3 ) ).toVar();
+					const w = anyW.mul( towardRay ).toVar();
+					const viewColor = c.rgb.div( max( c.a, 1e-3 ) ).toVar();
 
-				anyColor.addAssign( viewColor.mul( anyW ) );
-				anyWeight.addAssign( anyW );
+					color.addAssign( viewColor.mul( w ) );
+					localNormal.addAssign( viewNormal.mul( w ) );
+					weight.addAssign( w );
 
-				if ( materialMap ) {
+					anyColor.addAssign( viewColor.mul( anyW ) );
+					anyWeight.addAssign( anyW );
 
-					const viewSurface = texture( materialMap, atlasUV ).level( 0 ).rgb.div( max( c.a, 1e-3 ) ).toVar();
-					surface.addAssign( viewSurface.mul( w ) );
-					anySurface.addAssign( viewSurface.mul( anyW ) );
+					if ( materialMap ) {
 
-				}
+						const viewSurface = texture( materialMap, atlasUV ).level( 0 ).rgb.div( max( c.a, 1e-3 ) ).toVar();
+						surface.addAssign( viewSurface.mul( w ) );
+						anySurface.addAssign( viewSurface.mul( anyW ) );
 
-				if ( emissiveMap ) {
+					}
 
-					const viewGlow = texture( emissiveMap, atlasUV ).level( 0 ).rgb.div( max( c.a, 1e-3 ) ).toVar();
-					glow.addAssign( viewGlow.mul( w ) );
-					anyGlow.addAssign( viewGlow.mul( anyW ) );
+					if ( emissiveMap ) {
 
-				}
+						const viewGlow = texture( emissiveMap, atlasUV ).level( 0 ).rgb.div( max( c.a, 1e-3 ) ).toVar();
+						glow.addAssign( viewGlow.mul( w ) );
+						anyGlow.addAssign( viewGlow.mul( anyW ) );
+
+					}
+
+				} );
 
 			}
 

@@ -280,7 +280,7 @@
 					shape.impostor.material = new ImpostorNodeMaterial( data, { roughness: 0.95 } );
 					shape.wireframe.geometry = data.geometry;
 
-					for ( const map of [ data.colorMap, data.normalMap, data.intervalMap, data.rangeMap ] ) impostorBytes += map.image.width * map.image.height * 8;
+					for ( const map of [ data.colorMap, data.normalMap, data.intervalMap, data.rangeMap, data.distanceMap ] ) impostorBytes += map.image.width * map.image.height * ( map.format === THREE.RedFormat ? 1 : 8 );
 
 				}
 
